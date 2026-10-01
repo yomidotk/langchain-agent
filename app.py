@@ -25,10 +25,10 @@ ALIBABA_API_KEY = get_secret("ALIBABA_API_KEY")
 DO_URL = "https://inference.do-ai.run/v1/responses"
 DO_MODEL = "openai-gpt-oss-20b"
 
-# ---------- DESIGN SYSTEM ----------
-st.markdown("""
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+# ---------- DESIGN SYSTEM (st.html so <style> is not stripped) ----------
+st.html("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
   * { font-family: 'Plus Jakarta Sans', -apple-system, sans-serif !important; }
   .stApp { background: #FAFAF7; }
   #MainMenu, footer, header[data-testid="stHeader"] { display: none !important; }
@@ -177,7 +177,7 @@ st.markdown("""
   }
 </style>
 <div class="blob blob-1"></div><div class="blob blob-2"></div><div class="blob blob-3"></div>
-""", unsafe_allow_html=True)
+""")
 
 # ---------- Backend (unchanged brain) ----------
 def tts_to_mp3(text, out_path, voice="en-US-RogerNeural"):
@@ -481,7 +481,7 @@ if st.button("✨ Generate marketing bundle"):
                     for p in demo.get("script", "").split("\n\n") if p.strip())
     st.markdown(f"""<div class="demo-card anim d1"><div class="demo-kicker">★ FEATURED</div>
         <h2>{html.escape(demo.get('title', 'Demo Pitch'))}</h2>
-        <div id="demo-audio-ph"></div>{paras}</div>""", unsafe_allow_html=True)
+        {paras}</div>""", unsafe_allow_html=True)
     if demo.get("audio_path") and os.path.exists(demo["audio_path"]):
         with open(demo["audio_path"], "rb") as f:
             demo_bytes = f.read()
@@ -529,7 +529,6 @@ if st.button("✨ Generate marketing bundle"):
             <div class="hook">🪝 {hook}</div>
             <div class="vo-label">VOICEOVER SCRIPT</div>
             <p class="vo-script">"{html.escape(post.get('script', ''))}"</p>
-            <div id="post-audio-{i}"></div>
             <div class="cap-label">CAPTION</div>
             <p class="cap-text">{html.escape(post.get('caption', ''))}</p>
             <div class="tags">{"".join(f'<span class="tag">{html.escape(t)}</span>' for t in post.get("hashtags", []))}</div>
