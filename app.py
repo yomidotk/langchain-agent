@@ -402,17 +402,11 @@ st.html("""
   .post-wrap{display:grid;grid-template-columns:280px 1fr;gap:36px;align-items:start;background:var(--bg2);border:1px solid var(--border);border-radius:20px;padding:clamp(24px,4vw,40px);margin-bottom:20px;position:relative;z-index:2;animation:fadeUp .5s cubic-bezier(.22,1,.36,1) both;transition:border-color .2s,box-shadow .2s;}
   .post-wrap:hover{border-color:var(--border2);box-shadow:0 4px 24px rgba(0,0,0,.06);}
   .post-num{position:absolute;top:-12px;left:24px;background:var(--text);color:#fff;font-size:10.5px;font-weight:700;letter-spacing:.1em;padding:5px 14px;border-radius:999px;}
-  .phone{width:240px;margin:10px auto 0;background:#18181B;border-radius:44px;padding:9px;box-shadow:0 24px 48px -12px rgba(0,0,0,.3),0 0 0 1px rgba(255,255,255,.06);transition:transform .3s cubic-bezier(.34,1.56,.64,1);}
-  .phone:hover{transform:rotate(-1.5deg) scale(1.02);}
-  .phone-screen{background:#fff;border-radius:38px;overflow:hidden;position:relative;}
-  .notch{position:absolute;top:9px;left:50%;transform:translateX(-50%);width:80px;height:20px;background:#18181B;border-radius:999px;z-index:2;}
-  .ig-head{display:flex;align-items:center;gap:9px;padding:36px 12px 9px;}
-  .ig-avatar{width:28px;height:28px;border-radius:50%;flex-shrink:0;background:#18181B;display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;font-weight:800;}
-  .ig-user{font-size:12px;font-weight:700;color:#18181B;}
-  .ig-img{width:100%;aspect-ratio:1/1;object-fit:cover;display:block;background:var(--bg3);}
-  .ig-actions{display:flex;gap:12px;padding:9px 12px 4px;font-size:17px;}
-  .ig-cap{padding:4px 12px 14px;font-size:11.5px;color:#374151;line-height:1.55;}
-  .ig-cap b{color:#18181B;}
+  .post-img-wrap{border-radius:18px;overflow:hidden;border:1px solid var(--border);background:var(--bg3);
+    box-shadow:0 18px 40px -16px rgba(0,0,0,.22);
+    transition:transform .35s cubic-bezier(.22,1,.36,1),box-shadow .35s cubic-bezier(.22,1,.36,1);}
+  .post-img-wrap:hover{transform:translateY(-7px) scale(1.015);box-shadow:0 30px 60px -18px rgba(0,0,0,.3);}
+  .post-img{width:100%;aspect-ratio:1/1;object-fit:cover;display:block;background:var(--bg3);}
   .hook{font-family:'Sora',sans-serif!important;font-size:clamp(1.2rem,3vw,1.65rem);font-weight:800;color:var(--text);letter-spacing:-.03em;margin:0 0 18px;line-height:1.2;}
   .vo-label,.cap-label{font-size:10px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:var(--text4);margin:22px 0 7px;display:flex;align-items:center;gap:7px;}
   .vo-label::after,.cap-label::after{content:'';flex:1;height:1px;background:var(--border);}
@@ -461,7 +455,6 @@ st.html("""
     .pitch-grid,.how-grid,.bundle-grid{grid-template-columns:1fr;}
     .how-grid{gap:0;}
     .post-wrap{grid-template-columns:1fr;}
-    .phone{width:220px;}
     .stat{padding:18px 20px;}
     .ticker{margin:56px -16px 0;}
     .stats{border-radius:14px;}
@@ -575,21 +568,15 @@ if _btn:
             with open(post["img_path"], "rb") as f:
                 img_bytes = f.read()
             import base64 as _b64
-            img_tag = f'<img class="ig-img" src="data:image/png;base64,{_b64.b64encode(img_bytes).decode()}" />'
+            img_tag = f'<img class="post-img" src="data:image/png;base64,{_b64.b64encode(img_bytes).decode()}" />'
         else:
-            img_tag = ('<div class="ig-img" style="display:flex;align-items:center;justify-content:center;'
-                       'color:#a1a1aa;font-size:13px;padding:20px;text-align:center;">'
+            img_tag = ('<div class="post-img" style="display:flex;align-items:center;justify-content:center;'
+                       'color:#a1a1aa;font-size:13px;padding:20px;text-align:center;aspect-ratio:1/1;">'
                        f'⚠ image failed<br>{html.escape(post.get("img_error", ""))[:120]}</div>')
-        cap_preview = html.escape(post.get("caption", "").split("\n")[0])[:110]
         hook = html.escape(post.get("hook", ""))
         st.markdown(f"""<div class="post-wrap d{(i % 3) + 1}">
           <div class="post-num">POST {i}</div>
-          <div><div class="phone"><div class="phone-screen"><div class="notch"></div>
-            <div class="ig-head"><div class="ig-avatar">⚡</div><div class="ig-user">{repo_name}</div></div>
-            {img_tag}
-            <div class="ig-actions"><span>♡</span><span>💬</span><span>↗</span></div>
-            <div class="ig-cap"><b>{repo_name}</b> {cap_preview}…</div>
-          </div></div></div>
+          <div class="post-img-wrap">{img_tag}</div>
           <div>
             <div class="hook">🪝 {hook}</div>
             <div class="vo-label">VOICEOVER SCRIPT</div>
