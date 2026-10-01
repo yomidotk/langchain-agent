@@ -11,9 +11,8 @@ import streamlit as st
 from typing import TypedDict, List, Dict
 from langgraph.graph import StateGraph, END
 
-st.set_page_config(page_title="HypeRepo — AI Marketing Agent", page_icon="🚀", layout="centered")
+st.set_page_config(page_title="HypeRepo — AI Marketing Agent", page_icon="⚡", layout="centered")
 
-# ---------- Secrets ----------
 def get_secret(name):
     try:
         return st.secrets[name]
@@ -25,112 +24,181 @@ ALIBABA_API_KEY = get_secret("ALIBABA_API_KEY")
 DO_URL = "https://inference.do-ai.run/v1/responses"
 DO_MODEL = "openai-gpt-oss-20b"
 
-# ---------- DESIGN SYSTEM (st.html so <style> is not stripped) ----------
+# ================= DESIGN SYSTEM =================
 st.html("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@1,6..72,500;1,6..72,600&display=swap');
   * { font-family: 'Plus Jakarta Sans', -apple-system, sans-serif !important; }
+  html { scroll-behavior: smooth; }
+  ::selection { background: #DDD6FE; color: #4C1D95; }
   .stApp { background: #FAFAF7; }
   #MainMenu, footer, header[data-testid="stHeader"] { display: none !important; }
-  .block-container { max-width: 1080px !important; padding-top: 0 !important; padding-bottom: 60px; }
+  .block-container { max-width: 1120px !important; padding-top: 0 !important; padding-bottom: 40px; }
 
-  /* ambient gradient blobs */
-  .blob { position: fixed; border-radius: 50%; filter: blur(90px); z-index: 0; pointer-events: none; }
-  .blob-1 { width: 480px; height: 480px; background: #DDD6FE; opacity: .55; top: -140px; left: -120px; }
-  .blob-2 { width: 420px; height: 420px; background: #FBCFE8; opacity: .5; top: 20%; right: -140px; }
-  .blob-3 { width: 380px; height: 380px; background: #C7D2FE; opacity: .4; bottom: -120px; left: 30%; }
+  /* film grain */
+  .grain { position: fixed; inset: 0; z-index: 60; pointer-events: none; opacity: .05;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
+
+  /* ambient blobs, slow drift */
+  .blob { position: fixed; border-radius: 50%; filter: blur(100px); z-index: 0; pointer-events: none; }
+  .blob-1 { width: 520px; height: 520px; background: #DDD6FE; opacity: .5; top: -160px; left: -140px; animation: drift1 18s ease-in-out infinite alternate; }
+  .blob-2 { width: 460px; height: 460px; background: #FBCFE8; opacity: .45; top: 22%; right: -160px; animation: drift2 22s ease-in-out infinite alternate; }
+  .blob-3 { width: 400px; height: 400px; background: #C7D2FE; opacity: .4; bottom: -140px; left: 32%; animation: drift1 26s ease-in-out infinite alternate-reverse; }
+  @keyframes drift1 { from { transform: translate(0,0) scale(1); } to { transform: translate(60px,40px) scale(1.12); } }
+  @keyframes drift2 { from { transform: translate(0,0) scale(1.05); } to { transform: translate(-50px,60px) scale(.95); } }
+
+  /* nav */
+  .nav { position: sticky; top: 0; z-index: 50; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+         background: rgba(250,250,247,.78); border-bottom: 1px solid #ECE7DA; margin: 0 -40px; padding: 0 40px; }
+  .nav-inner { max-width: 1120px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; height: 64px; }
+  .logo { font-weight: 800; font-size: 18px; letter-spacing: -.02em; color: #18181B; }
+  .logo span { background: linear-gradient(120deg,#6366F1,#A855F7); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .nav-links { display: flex; gap: 28px; }
+  .nav-links a { color: #71717A; text-decoration: none; font-size: 14px; font-weight: 600; transition: color .2s; }
+  .nav-links a:hover { color: #18181B; }
+  .nav-cta { background: #18181B; color: #fff !important; text-decoration: none; font-size: 13.5px; font-weight: 700;
+             padding: 10px 22px; border-radius: 999px; transition: transform .15s, box-shadow .15s; }
+  .nav-cta:hover { transform: translateY(-1px); box-shadow: 0 10px 24px -8px rgba(0,0,0,.4); }
 
   /* hero */
-  .hero { text-align: center; padding: 64px 16px 8px; position: relative; z-index: 1; }
-  .badge { display: inline-block; font-size: 12px; font-weight: 700; letter-spacing: .18em;
-           color: #6D28D9; background: #F3EFFF; border: 1px solid #E2D9FD;
-           padding: 8px 18px; border-radius: 999px; margin-bottom: 22px; }
-  .hero h1 { font-size: clamp(2.4rem, 6vw, 4.2rem); font-weight: 800; letter-spacing: -.035em;
-             line-height: 1.05; color: #18181B; margin: 0 0 16px; }
-  .grad-text { background: linear-gradient(120deg, #6366F1, #A855F7 55%, #EC4899);
-               -webkit-background-clip: text; background-clip: text; color: transparent; }
-  .hero p.sub { font-size: clamp(1rem, 2.4vw, 1.2rem); color: #71717A; max-width: 620px; margin: 0 auto 8px; line-height: 1.6; }
+  .hero { text-align: center; padding: 84px 16px 10px; position: relative; z-index: 1; }
+  .badge { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; letter-spacing: .14em;
+           color: #6D28D9; background: rgba(243,239,255,.85); border: 1px solid #E2D9FD;
+           padding: 9px 20px; border-radius: 999px; margin-bottom: 26px; backdrop-filter: blur(6px); }
+  .badge .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: #8B5CF6; animation: pulse 1.6s infinite; }
+  .hero h1 { font-size: clamp(2.6rem, 6.5vw, 4.6rem); font-weight: 800; letter-spacing: -.04em;
+             line-height: 1.04; color: #0A0A0B; margin: 0 0 20px; }
+  .serif-accent { font-family: 'Newsreader', Georgia, serif !important; font-style: italic; font-weight: 500;
+                  letter-spacing: -.01em; background: linear-gradient(115deg, #6366F1 10%, #A855F7 50%, #EC4899 90%);
+                  background-size: 200% auto; -webkit-background-clip: text; background-clip: text; color: transparent;
+                  animation: shimmer 6s linear infinite; }
+  @keyframes shimmer { to { background-position: 200% center; } }
+  .hero p.sub { font-size: clamp(1.02rem, 2.4vw, 1.22rem); color: #71717A; max-width: 640px; margin: 0 auto 6px; line-height: 1.65; }
 
   /* repo input pill */
-  div[data-testid="stTextInput"] { max-width: 620px; margin: 26px auto 0; position: relative; z-index: 1; }
+  div[data-testid="stTextInput"] { max-width: 640px; margin: 30px auto 0; position: relative; z-index: 1; }
   div[data-testid="stTextInput"] label { display: none; }
-  div[data-testid="stTextInput"] input { border-radius: 999px !important; padding: 17px 26px !important;
-      font-size: 16px !important; border: 2px solid #E9E3D6 !important; background: #fff !important;
-      box-shadow: 0 10px 30px -12px rgba(99,102,241,.25); color: #18181B; }
+  div[data-testid="stTextInput"] input { border-radius: 999px !important; padding: 18px 28px !important;
+      font-size: 16px !important; border: 2px solid #E9E3D6 !important; background: rgba(255,255,255,.9) !important;
+      box-shadow: 0 14px 34px -14px rgba(99,102,241,.3); color: #18181B; backdrop-filter: blur(6px);
+      transition: border-color .2s, box-shadow .2s; }
   div[data-testid="stTextInput"] input:focus { border-color: #8B5CF6 !important;
-      box-shadow: 0 0 0 4px rgba(139,92,246,.15), 0 10px 30px -12px rgba(99,102,241,.35) !important; }
+      box-shadow: 0 0 0 5px rgba(139,92,246,.14), 0 14px 34px -14px rgba(99,102,241,.4) !important; }
 
-  /* generate button */
-  div[data-testid="stButton"] { text-align: center; margin-top: 18px; position: relative; z-index: 1; }
+  /* generate button + shine sweep */
+  div[data-testid="stButton"] { text-align: center; margin-top: 20px; position: relative; z-index: 1; }
   div[data-testid="stButton"] button { background: linear-gradient(120deg, #6366F1, #A855F7) !important;
       color: #fff !important; border: none !important; border-radius: 999px !important;
-      padding: 15px 54px !important; font-size: 17px !important; font-weight: 700 !important;
-      box-shadow: 0 14px 30px -10px rgba(139,92,246,.55); transition: transform .15s ease, box-shadow .15s ease; }
+      padding: 16px 58px !important; font-size: 17px !important; font-weight: 700 !important;
+      box-shadow: 0 16px 34px -10px rgba(139,92,246,.6); transition: transform .15s ease, box-shadow .15s ease;
+      position: relative; overflow: hidden; }
+  div[data-testid="stButton"] button::after { content: ""; position: absolute; top: 0; left: -90%; width: 45%; height: 100%;
+      background: linear-gradient(100deg, transparent, rgba(255,255,255,.55), transparent);
+      transform: skewX(-20deg); transition: left .65s ease; }
   div[data-testid="stButton"] button:hover { transform: translateY(-2px) scale(1.02);
-      box-shadow: 0 20px 40px -10px rgba(139,92,246,.65); }
-  div[data-testid="stButton"] button:active { transform: scale(.98); }
+      box-shadow: 0 22px 44px -10px rgba(139,92,246,.7); }
+  div[data-testid="stButton"] button:hover::after { left: 140%; }
+
+  /* stats row */
+  .stats { display: flex; justify-content: center; gap: 0; margin: 44px auto 0; max-width: 720px;
+           position: relative; z-index: 1; flex-wrap: wrap; }
+  .stat { text-align: center; padding: 6px 34px; }
+  .stat + .stat { border-left: 1px solid #E7E2D5; }
+  .stat b { display: block; font-size: 30px; font-weight: 800; letter-spacing: -.03em; color: #18181B; }
+  .stat span { font-size: 12.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: #A1A1AA; }
+
+  /* ticker */
+  .ticker { margin: 56px -40px 0; padding: 0 40px; border-top: 1px solid #ECE7DA; border-bottom: 1px solid #ECE7DA;
+            background: rgba(255,255,255,.6); backdrop-filter: blur(8px); overflow: hidden; position: relative; z-index: 1; }
+  .ticker-track { display: flex; gap: 0; width: max-content; animation: tick 26s linear infinite; padding: 16px 0; }
+  .ticker:hover .ticker-track { animation-play-state: paused; }
+  .tick { font-size: 13px; font-weight: 800; letter-spacing: .22em; color: #A1A1AA; padding: 0 26px; white-space: nowrap; }
+  .tick em { font-style: normal; color: #8B5CF6; padding-right: 26px; }
+  @keyframes tick { to { transform: translateX(-50%); } }
+
+  /* section scaffolding */
+  .section { max-width: 1000px; margin: 0 auto; padding: 84px 20px 0; position: relative; z-index: 1; }
+  .kicker { font-size: 12px; font-weight: 800; letter-spacing: .2em; color: #8B5CF6; margin-bottom: 14px; }
+  .sec-h { font-size: clamp(1.7rem, 4vw, 2.6rem); font-weight: 800; letter-spacing: -.03em; color: #0A0A0B; margin: 0 0 12px; }
+  .sec-p { color: #71717A; font-size: 16.5px; line-height: 1.65; max-width: 620px; margin: 0 0 36px; }
+
+  /* how it works */
+  .how-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  .how-card { background: #fff; border: 1px solid #ECE7DA; border-radius: 22px; padding: 30px 26px;
+              position: relative; overflow: hidden; transition: transform .25s ease, box-shadow .25s ease; }
+  .how-card:hover { transform: translateY(-5px); box-shadow: 0 24px 44px -18px rgba(99,102,241,.25); }
+  .how-num { font-size: 64px; font-weight: 800; letter-spacing: -.04em; line-height: 1;
+             background: linear-gradient(180deg, #EDE9FE, #F5F3FF); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .how-card h3 { font-size: 17px; font-weight: 800; margin: 14px 0 8px; color: #18181B; }
+  .how-card p { font-size: 14.5px; color: #71717A; line-height: 1.65; margin: 0; }
+
+  /* bundle grid */
+  .bundle-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  .bundle-card { background: rgba(255,255,255,.75); border: 1px solid #ECE7DA; border-radius: 20px; padding: 26px 24px;
+                 backdrop-filter: blur(8px); transition: transform .25s ease, box-shadow .25s ease, border-color .25s; }
+  .bundle-card:hover { transform: translateY(-5px); box-shadow: 0 22px 40px -18px rgba(99,102,241,.28); border-color: #D8CCFA; }
+  .bundle-icon { width: 46px; height: 46px; border-radius: 14px; display: flex; align-items: center; justify-content: center;
+                 font-size: 22px; background: linear-gradient(135deg, #EEF2FF, #F5F0FF); border: 1px solid #E4DEF5; margin-bottom: 16px; }
+  .bundle-card h3 { font-size: 16px; font-weight: 800; margin: 0 0 6px; color: #18181B; }
+  .bundle-card p { font-size: 13.5px; color: #71717A; line-height: 1.6; margin: 0; }
 
   /* pipeline steps */
   .steps { display: flex; gap: 6px; justify-content: center; margin: 34px auto 10px;
-           max-width: 860px; position: relative; z-index: 1; flex-wrap: wrap; }
-  .step { display: flex; align-items: center; gap: 10px; background: #fff; border: 1.5px solid #ECE7DA;
-          border-radius: 999px; padding: 10px 18px 10px 10px; font-size: 13.5px; font-weight: 600; color: #A1A1AA; }
+           max-width: 900px; position: relative; z-index: 1; flex-wrap: wrap; }
+  .step { display: flex; align-items: center; gap: 10px; background: rgba(255,255,255,.85); border: 1.5px solid #ECE7DA;
+          border-radius: 999px; padding: 10px 18px 10px 10px; font-size: 13.5px; font-weight: 600; color: #A1A1AA;
+          backdrop-filter: blur(6px); }
   .step .dot { width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center;
                justify-content: center; background: #F4F2EC; font-size: 14px; flex-shrink: 0; }
   .step.done { color: #18181B; border-color: #D9F2E3; background: #F4FBF6; }
   .step.done .dot { background: linear-gradient(135deg, #34D399, #10B981); color: #fff; }
-  .step.active { color: #18181B; border-color: #C4B5FD; background: #FAF8FF;
-                 box-shadow: 0 0 0 4px rgba(139,92,246,.12); }
+  .step.active { color: #18181B; border-color: #C4B5FD; background: #FAF8FF; box-shadow: 0 0 0 4px rgba(139,92,246,.12); }
   .step.active .dot { background: linear-gradient(135deg, #6366F1, #A855F7); color: #fff; animation: pulse 1.2s infinite; }
   @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.15); } }
 
-  /* section titles */
-  .sec-title { font-size: clamp(1.5rem, 3.5vw, 2rem); font-weight: 800; letter-spacing: -.02em;
-               color: #18181B; margin: 54px 0 6px; position: relative; z-index: 1; }
-  .sec-sub { color: #71717A; margin-bottom: 24px; position: relative; z-index: 1; }
-
-  /* demo pitch dark card */
-  .demo-card { background: #101014; border-radius: 26px; padding: clamp(22px, 4vw, 40px); color: #fff;
+  /* results */
+  .sec-title { font-size: clamp(1.5rem, 3.5vw, 2rem); font-weight: 800; letter-spacing: -.025em;
+               color: #0A0A0B; margin: 64px 0 6px; position: relative; z-index: 1; }
+  .sec-sub { color: #71717A; margin-bottom: 24px; position: relative; z-index: 1; font-size: 15.5px; }
+  .demo-card { background: #0E0E12; border-radius: 26px; padding: clamp(24px, 4vw, 44px); color: #fff;
                position: relative; overflow: hidden; z-index: 1;
-               box-shadow: 0 30px 60px -20px rgba(0,0,0,.45); margin-top: 18px; }
-  .demo-card::before { content: ""; position: absolute; width: 420px; height: 420px; border-radius: 50%;
-      background: radial-gradient(circle, rgba(139,92,246,.35), transparent 70%); top: -160px; right: -120px; }
-  .demo-card::after { content: ""; position: absolute; width: 340px; height: 340px; border-radius: 50%;
-      background: radial-gradient(circle, rgba(236,72,153,.22), transparent 70%); bottom: -140px; left: -100px; }
-  .demo-kicker { display: inline-block; font-size: 11.5px; font-weight: 700; letter-spacing: .16em;
-                 color: #FBBF24; margin-bottom: 10px; position: relative; z-index: 1; }
+               box-shadow: 0 34px 70px -22px rgba(0,0,0,.5); margin-top: 18px; border: 1px solid #26262e; }
+  .demo-card::before { content: ""; position: absolute; width: 440px; height: 440px; border-radius: 50%;
+      background: radial-gradient(circle, rgba(139,92,246,.32), transparent 70%); top: -170px; right: -130px; animation: drift1 14s ease-in-out infinite alternate; }
+  .demo-card::after { content: ""; position: absolute; width: 360px; height: 360px; border-radius: 50%;
+      background: radial-gradient(circle, rgba(236,72,153,.2), transparent 70%); bottom: -150px; left: -110px; }
+  .demo-kicker { display: inline-block; font-size: 11.5px; font-weight: 700; letter-spacing: .18em;
+                 color: #FBBF24; margin-bottom: 12px; position: relative; z-index: 1; }
   .demo-card h2 { font-size: clamp(1.4rem, 3.4vw, 2rem); font-weight: 800; margin: 0 0 18px;
                   position: relative; z-index: 1; letter-spacing: -.02em; }
-  .demo-card p.script { color: #D4D4D8; line-height: 1.75; font-size: 15.5px; position: relative; z-index: 1; }
-  .demo-card audio { width: 100%; margin: 6px 0 20px; position: relative; z-index: 1; }
-
-  /* pitch cards grid */
+  .demo-card p.script { color: #D4D4D8; line-height: 1.8; font-size: 15.5px; position: relative; z-index: 1; }
   .pitch-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; position: relative; z-index: 1; }
-  .pitch-card { background: #fff; border: 1.5px solid #EFEAE0; border-radius: 20px; padding: 26px 22px;
-                box-shadow: 0 12px 30px -14px rgba(0,0,0,.12); position: relative; overflow: hidden;
-                animation: fadeUp .6s ease both; }
+  .pitch-card { background: #fff; border: 1px solid #ECE7DA; border-radius: 20px; padding: 28px 24px;
+                box-shadow: 0 14px 32px -16px rgba(0,0,0,.12); position: relative; overflow: hidden;
+                animation: fadeUp .6s ease both; transition: transform .25s ease, box-shadow .25s ease; }
+  .pitch-card:hover { transform: translateY(-4px); box-shadow: 0 24px 44px -16px rgba(99,102,241,.25); }
   .pitch-card::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 5px;
       background: linear-gradient(90deg, #6366F1, #A855F7, #EC4899); }
   .pitch-card .icon { font-size: 30px; margin-bottom: 12px; }
   .pitch-card h3 { font-size: 17px; font-weight: 800; color: #18181B; margin: 0 0 8px; letter-spacing: -.01em; }
   .pitch-card p { font-size: 14px; color: #71717A; line-height: 1.6; margin: 0; }
-
-  /* social post layout */
-  .post-wrap { display: grid; grid-template-columns: 320px 1fr; gap: 34px; align-items: start;
-               background: #fff; border: 1.5px solid #EFEAE0; border-radius: 26px;
-               padding: clamp(20px, 4vw, 36px); margin-bottom: 26px; position: relative; z-index: 1;
-               box-shadow: 0 18px 44px -20px rgba(0,0,0,.14); animation: fadeUp .6s ease both; }
+  .post-wrap { display: grid; grid-template-columns: 320px 1fr; gap: 36px; align-items: start;
+               background: rgba(255,255,255,.9); border: 1px solid #ECE7DA; border-radius: 26px;
+               padding: clamp(22px, 4vw, 38px); margin-bottom: 28px; position: relative; z-index: 1;
+               box-shadow: 0 20px 48px -22px rgba(0,0,0,.16); animation: fadeUp .6s ease both;
+               transition: transform .25s ease, box-shadow .25s ease; backdrop-filter: blur(8px); }
+  .post-wrap:hover { transform: translateY(-3px); box-shadow: 0 28px 56px -22px rgba(99,102,241,.28); }
   .post-num { position: absolute; top: -16px; left: 28px; background: linear-gradient(120deg,#6366F1,#A855F7);
               color: #fff; font-size: 12px; font-weight: 800; letter-spacing: .1em;
               padding: 7px 16px; border-radius: 999px; box-shadow: 0 8px 18px -6px rgba(139,92,246,.6); }
-
-  /* phone mockup */
   .phone { width: 280px; margin: 14px auto 0; background: #0c0c0e; border-radius: 46px; padding: 11px;
-           box-shadow: 0 34px 60px -18px rgba(0,0,0,.4), 0 0 0 2px #2b2b30; }
+           box-shadow: 0 34px 60px -18px rgba(0,0,0,.4), 0 0 0 2px #2b2b30; transition: transform .3s ease; }
+  .phone:hover { transform: rotate(-1.2deg) scale(1.015); }
   .phone-screen { background: #fff; border-radius: 36px; overflow: hidden; position: relative; }
   .notch { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); width: 100px; height: 24px;
            background: #0c0c0e; border-radius: 999px; z-index: 2; }
-  .ig-head { display: flex; align-items: center; gap: 10px; padding: 40px 14px 10px; }
+  .ig-head { display: flex; align-items: center; gap: 10px; padding: 42px 14px 10px; }
   .ig-avatar { width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
                background: linear-gradient(135deg,#6366F1,#EC4899); display: flex; align-items: center;
                justify-content: center; color: #fff; font-size: 16px; font-weight: 800; }
@@ -139,9 +207,7 @@ st.html("""
   .ig-actions { display: flex; gap: 14px; padding: 12px 14px 4px; font-size: 20px; }
   .ig-cap { padding: 6px 14px 18px; font-size: 12.5px; color: #3f3f46; line-height: 1.55; }
   .ig-cap b { color: #18181B; }
-
-  /* post details */
-  .hook { font-size: clamp(1.2rem, 3vw, 1.6rem); font-weight: 800; color: #18181B;
+  .hook { font-size: clamp(1.2rem, 3vw, 1.6rem); font-weight: 800; color: #0A0A0B;
           letter-spacing: -.02em; margin: 6px 0 14px; line-height: 1.25; }
   .vo-label { font-size: 12px; font-weight: 700; letter-spacing: .12em; color: #8B5CF6; margin: 18px 0 6px; }
   .vo-script { font-size: 15px; color: #3f3f46; font-style: italic; line-height: 1.65;
@@ -150,36 +216,233 @@ st.html("""
   .cap-text { font-size: 14.5px; color: #52525B; line-height: 1.65; white-space: pre-line; }
   .tags { margin-top: 12px; }
   .tag { display: inline-block; background: #F3EFFF; color: #6D28D9; font-size: 12.5px; font-weight: 700;
-         padding: 6px 13px; border-radius: 999px; margin: 0 6px 6px 0; }
-
-  /* download buttons */
+         padding: 6px 13px; border-radius: 999px; margin: 0 6px 6px 0; transition: transform .15s; }
+  .tag:hover { transform: scale(1.06); }
   div[data-testid="stDownloadButton"] button { border-radius: 999px !important; font-weight: 700 !important;
       border: 2px solid #E4DEF5 !important; color: #6D28D9 !important; background: #fff !important;
-      padding: 9px 22px !important; font-size: 13.5px !important; width: 100%; }
-  div[data-testid="stDownloadButton"] button:hover { background: #F5F2FF !important; border-color: #8B5CF6 !important; }
+      padding: 9px 22px !important; font-size: 13.5px !important; width: 100%; transition: all .2s; }
+  div[data-testid="stDownloadButton"] button:hover { background: #F5F2FF !important; border-color: #8B5CF6 !important;
+      transform: translateY(-1px); }
+  div[data-testid="stExpander"] { border: 1px solid #ECE7DA !important; border-radius: 16px !important;
+      background: rgba(255,255,255,.85) !important; position: relative; z-index: 1; }
 
-  /* expander */
-  div[data-testid="stExpander"] { border: 1.5px solid #EFEAE0 !important; border-radius: 16px !important;
-      background: #fff !important; position: relative; z-index: 1; }
+  /* dark CTA */
+  .cta-dark { margin: 90px auto 0; max-width: 1000px; background: #0E0E12; border-radius: 30px; padding: clamp(36px,6vw,70px);
+              text-align: center; position: relative; overflow: hidden; z-index: 1; border: 1px solid #26262e;
+              box-shadow: 0 40px 80px -30px rgba(0,0,0,.55); }
+  .cta-dark::before { content: ""; position: absolute; inset: -2px; border-radius: 30px; padding: 2px;
+      background: linear-gradient(120deg, #6366F1, #A855F7, #EC4899, #6366F1); background-size: 300% 300%;
+      -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0); -webkit-mask-composite: xor;
+      mask-composite: exclude; animation: borderflow 8s linear infinite; pointer-events: none; }
+  @keyframes borderflow { to { background-position: 300% 0; } }
+  .cta-dark h2 { color: #fff; font-size: clamp(1.8rem, 4.5vw, 3rem); font-weight: 800; letter-spacing: -.03em;
+                 margin: 0 0 14px; position: relative; z-index: 1; }
+  .cta-dark p { color: #A1A1AA; font-size: 16.5px; max-width: 520px; margin: 0 auto; line-height: 1.65; position: relative; z-index: 1; }
+  .cta-dark .serif-accent { font-size: 1.08em; }
 
-  .footer { text-align: center; color: #A1A1AA; font-size: 13px; margin-top: 70px; position: relative; z-index: 1; }
-  .footer b { color: #6D28D9; }
+  /* footer */
+  .footer { margin-top: 70px; border-top: 1px solid #ECE7DA; padding: 36px 20px 10px; position: relative; z-index: 1; }
+  .footer-inner { max-width: 1000px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px; }
+  .footer .logo { font-size: 16px; }
+  .footer p { color: #A1A1AA; font-size: 13px; margin: 0; }
+  .footer p b { color: #6D28D9; }
 
-  @keyframes fadeUp { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: none; } }
-  .anim { animation: fadeUp .7s ease both; }
-  .d1 { animation-delay: .08s; } .d2 { animation-delay: .16s; } .d3 { animation-delay: .24s; }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(26px); } to { opacity: 1; transform: none; } }
+  .anim { animation: fadeUp .8s cubic-bezier(.22,1,.36,1) both; }
+  .d1 { animation-delay: .1s; } .d2 { animation-delay: .2s; } .d3 { animation-delay: .3s; } .d4 { animation-delay: .4s; }
 
-  @media (max-width: 820px) {
-    .pitch-grid { grid-template-columns: 1fr; }
+  @media (max-width: 860px) {
+    .nav { margin: 0 -16px; padding: 0 16px; }
+    .nav-links { display: none; }
+    .pitch-grid, .how-grid, .bundle-grid { grid-template-columns: 1fr; }
     .post-wrap { grid-template-columns: 1fr; }
     .phone { width: 250px; }
-    .steps { justify-content: flex-start; }
+    .stat { padding: 6px 18px; }
+    .ticker { margin: 44px -16px 0; padding: 0 16px; }
   }
 </style>
+<div class="grain"></div>
 <div class="blob blob-1"></div><div class="blob blob-2"></div><div class="blob blob-3"></div>
 """)
 
-# ---------- Backend (unchanged brain) ----------
+# ================= NAV =================
+st.html("""
+<nav class="nav"><div class="nav-inner">
+  <div class="logo">⚡ <span>HypeRepo</span></div>
+  <div class="nav-links"><a href="#how">How it works</a><a href="#bundle">The bundle</a></div>
+  <a class="nav-cta" href="#top">Launch ✦</a>
+</div></nav>
+""")
+
+# ================= HERO =================
+st.html("""
+<div class="hero" id="top">
+  <div class="badge anim"><span class="pulse-dot"></span>AI MARKETING AGENT</div>
+  <h1 class="anim d1">Turn any repo into<br><span class="serif-accent">a launch campaign.</span></h1>
+  <p class="sub anim d2">Paste a GitHub URL. HypeRepo reads your README <em> and </em> your source code,
+  figures out what you actually built — then writes your pitch, designs your visuals,
+  and records your voiceovers.</p>
+</div>
+""")
+
+if not DO_API_KEY or not ALIBABA_API_KEY:
+    st.error("🔑 Missing API keys — add `DO_API_KEY` and `ALIBABA_API_KEY` in the app's Secrets settings.")
+    st.stop()
+
+st.html('<div class="anim d3">', )
+repo_url = st.text_input("repo", placeholder="https://github.com/owner/repo  —  paste any public repo URL")
+st.html('</div>')
+
+if st.button("✨ Generate marketing bundle"):
+    if not repo_url.strip() or "github.com" not in repo_url:
+        st.error("Please paste a valid GitHub repo URL.")
+        st.stop()
+
+    out_dir = tempfile.mkdtemp(prefix="mktg_")
+    final, done = {}, []
+    steps_ph = st.empty()
+    steps_ph.markdown(render_steps(done, active="fetch_repo"), unsafe_allow_html=True)
+    for chunk in video_agent.stream({"repo_url": repo_url.strip(), "out_dir": out_dir}):
+        for node, update in chunk.items():
+            if update:
+                final.update(update)
+            done.append(node)
+            nxt = next((k for k, _, _ in STEPS if k not in done), None)
+            steps_ph.markdown(render_steps(done, active=nxt), unsafe_allow_html=True)
+    steps_ph.markdown(render_steps(done), unsafe_allow_html=True)
+
+    m = re.search(r"github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+)", repo_url)
+    repo_name = html.escape(m.group(2)) if m else "project"
+
+    brief = final.get("concept_brief", {})
+    with st.expander("🔍 What the AI understood about this repo"):
+        st.markdown(f"**{brief.get('one_liner', '')}**")
+        st.write(brief.get("concept", ""))
+        feats = brief.get("key_features", [])
+        if feats:
+            st.markdown("**Key features spotted in the code:**")
+            for f in feats:
+                st.markdown(f"- {f}")
+
+    demo = final.get("demo_pitch", {})
+    st.markdown('<div class="sec-title anim">🎤 The 2-Minute Demo Pitch</div>'
+                '<div class="sec-sub anim d1">Your voiceover-ready script, with full studio audio.</div>', unsafe_allow_html=True)
+    paras = "".join(f"<p class='script'>{html.escape(p.strip())}</p>"
+                    for p in demo.get("script", "").split("\n\n") if p.strip())
+    st.markdown(f"""<div class="demo-card anim d1"><div class="demo-kicker">★ FEATURED</div>
+        <h2>{html.escape(demo.get('title', 'Demo Pitch'))}</h2>{paras}</div>""", unsafe_allow_html=True)
+    if demo.get("audio_path") and os.path.exists(demo["audio_path"]):
+        with open(demo["audio_path"], "rb") as f:
+            demo_bytes = f.read()
+        st.audio(demo_bytes, format="audio/mpeg")
+        st.download_button("⬇️ Download demo pitch audio", demo_bytes, file_name="demo_pitch.mp3")
+
+    st.markdown('<div class="sec-title anim">✨ Pitch Cards</div>'
+                '<div class="sec-sub anim d1">The three strongest angles — ready for your README or landing page.</div>',
+                unsafe_allow_html=True)
+    icons = ["⚡", "🎯", "💎"]
+    cards_html = "".join(
+        f"""<div class="pitch-card d{i+1}"><div class="icon">{icons[i % 3]}</div>
+            <h3>{html.escape(c.get('headline', ''))}</h3><p>{html.escape(c.get('sub', ''))}</p></div>"""
+        for i, c in enumerate(final.get("pitch_cards", [])))
+    st.markdown(f'<div class="pitch-grid">{cards_html}</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="sec-title anim">📱 Social Posts</div>'
+                '<div class="sec-sub anim d1">Hook, voiceover, AI visual, caption & hashtags — previewed like real posts.</div>',
+                unsafe_allow_html=True)
+    for i, post in enumerate(final.get("social_posts", []), 1):
+        img_bytes = None
+        if post.get("img_path") and os.path.exists(post["img_path"]):
+            with open(post["img_path"], "rb") as f:
+                img_bytes = f.read()
+            import base64 as _b64
+            img_tag = f'<img class="ig-img" src="data:image/png;base64,{_b64.b64encode(img_bytes).decode()}" />'
+        else:
+            img_tag = ('<div class="ig-img" style="display:flex;align-items:center;justify-content:center;'
+                       'color:#a1a1aa;font-size:13px;padding:20px;text-align:center;">'
+                       f'⚠ image failed<br>{html.escape(post.get("img_error", ""))[:120]}</div>')
+        cap_preview = html.escape(post.get("caption", "").split("\n")[0])[:110]
+        hook = html.escape(post.get("hook", ""))
+        st.markdown(f"""<div class="post-wrap d{(i % 3) + 1}">
+          <div class="post-num">POST {i}</div>
+          <div><div class="phone"><div class="phone-screen"><div class="notch"></div>
+            <div class="ig-head"><div class="ig-avatar">⚡</div><div class="ig-user">{repo_name}</div></div>
+            {img_tag}
+            <div class="ig-actions"><span>♡</span><span>💬</span><span>↗</span></div>
+            <div class="ig-cap"><b>{repo_name}</b> {cap_preview}…</div>
+          </div></div></div>
+          <div>
+            <div class="hook">🪝 {hook}</div>
+            <div class="vo-label">VOICEOVER SCRIPT</div>
+            <p class="vo-script">"{html.escape(post.get('script', ''))}"</p>
+            <div class="cap-label">CAPTION</div>
+            <p class="cap-text">{html.escape(post.get('caption', ''))}</p>
+            <div class="tags">{"".join(f'<span class="tag">{html.escape(t)}</span>' for t in post.get("hashtags", []))}</div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+        a_bytes = None
+        if post.get("audio_path") and os.path.exists(post["audio_path"]):
+            with open(post["audio_path"], "rb") as f:
+                a_bytes = f.read()
+            st.audio(a_bytes, format="audio/mpeg")
+        c1, c2 = st.columns(2)
+        with c1:
+            if img_bytes:
+                st.download_button(f"⬇️ Image {i}", img_bytes, file_name=f"post_{i}.png", key=f"dl_img_{i}")
+        with c2:
+            if a_bytes:
+                st.download_button(f"⬇️ Voiceover {i}", a_bytes, file_name=f"post_{i}.mp3", key=f"dl_aud_{i}")
+
+# ================= STATS =================
+st.html("""
+<div class="stats anim">
+  <div class="stat"><b>3</b><span>AI visuals</span></div>
+  <div class="stat"><b>4</b><span>Voiceovers</span></div>
+  <div class="stat"><b>3</b><span>Pitch cards</span></div>
+  <div class="stat"><b>1</b><span>Demo pitch</span></div>
+</div>
+""")
+
+# ================= TICKER =================
+st.html("""
+<div class="ticker"><div class="ticker-track">
+  <span class="tick"><em>✦</em>PITCH CARDS</span><span class="tick"><em>✦</em>AI VOICEOVERS</span><span class="tick"><em>✦</em>SCROLL-STOPPING VISUALS</span><span class="tick"><em>✦</em>2-MINUTE DEMO PITCH</span><span class="tick"><em>✦</em>CAPTIONS & HASHTAGS</span><span class="tick"><em>✦</em>ZERO EDITING NEEDED</span>
+  <span class="tick"><em>✦</em>PITCH CARDS</span><span class="tick"><em>✦</em>AI VOICEOVERS</span><span class="tick"><em>✦</em>SCROLL-STOPPING VISUALS</span><span class="tick"><em>✦</em>2-MINUTE DEMO PITCH</span><span class="tick"><em>✦</em>CAPTIONS & HASHTAGS</span><span class="tick"><em>✦</em>ZERO EDITING NEEDED</span>
+</div></div>
+""")
+
+# ================= HOW IT WORKS =================
+st.html("""
+<div class="section" id="how">
+  <div class="kicker">HOW IT WORKS</div>
+  <div class="sec-h">From repo link to launch kit<br>in under five minutes.</div>
+  <p class="sec-p">No prompts to write, no tools to learn. A five-stage AI pipeline does the reading, the thinking, the designing and the talking.</p>
+  <div class="how-grid">
+    <div class="how-card"><div class="how-num">01</div><h3>🔗 Paste your repo</h3><p>Drop any public GitHub URL. The agent pulls your README, repo metadata and your actual source files — not just the docs.</p></div>
+    <div class="how-card"><div class="how-num">02</div><h3>🧠 AI understands it</h3><p>A senior-engineer-grade analysis builds a concept brief: what you built, how it works, who it's for, and what makes it different.</p></div>
+    <div class="how-card"><div class="how-num">03</div><h3>🚀 Ship the hype</h3><p>Get pitch cards, three social posts with AI visuals and voiceovers, plus a full 2-minute demo pitch with studio audio. Download everything.</p></div>
+  </div>
+</div>
+""")
+
+# ================= BUNDLE =================
+st.html("""
+<div class="section" id="bundle">
+  <div class="kicker">THE BUNDLE</div>
+  <div class="sec-h">Everything a launch needs.<br>Nothing it doesn't.</div>
+  <p class="sec-p">Every asset is generated from the concept brief — grounded in your actual code, never generic filler.</p>
+  <div class="bundle-grid">
+    <div class="bundle-card"><div class="bundle-icon">✨</div><h3>Pitch cards</h3><p>Three razor-sharp angles with concrete proof points, ready for your README or landing page hero.</p></div>
+    <div class="bundle-card"><div class="bundle-icon">📱</div><h3>Social posts</h3><p>Problem → magic moment → proof. Hooks, captions and hashtags written to stop the scroll.</p></div>
+    <div class="bundle-card"><div class="bundle-icon">🎨</div><h3>AI visuals</h3><p>Custom square promo graphics per post, generated from prompts that describe your project's real subject matter.</p></div>
+    <div class="bundle-card"><div class="bundle-icon">🎙️</div><h3>Voiceovers</h3><p>Natural-sounding narration for every post plus the full demo pitch — no microphone required.</p></div>
+    <div class="bundle-card"><div class="bundle-icon">🎤</div><h3>2-minute demo pitch</h3><p>A structured demo-day script — cold open, problem, walkthrough, features, call to action — with full audio.</p></div>
+    <div class="bundle-card"><div class="bundle-icon">⬇️</div><h3>Download kit</h3><p>Every image and audio file is one click away. Take the whole bundle straight to your scheduler.</p></div>
+  </div>
+</div>
+""")
+
+# ================= BACKEND (unchanged brain) =================
 def tts_to_mp3(text, out_path, voice="en-US-RogerNeural"):
     def _run():
         async def _main():
@@ -428,123 +691,14 @@ def render_steps(done, active=None):
         parts.append(f'<div class="step {cls}"><div class="dot">{mark}</div>{label}</div>')
     return '<div class="steps">' + "".join(parts) + "</div>"
 
-# ---------- UI ----------
-st.markdown('<div class="hero"><div class="badge">AI MARKETING AGENT</div>'
-           '<h1>Turn any repo into<br><span class="grad-text">a launch campaign.</span></h1>'
-           '<p class="sub">Paste a GitHub URL. HypeRepo reads the code, understands the project, '
-           'then generates pitch cards, social posts with AI images & voiceovers, and a 2-minute demo pitch.</p></div>',
-           unsafe_allow_html=True)
-
-if not DO_API_KEY or not ALIBABA_API_KEY:
-    st.error("🔑 Missing API keys — add `DO_API_KEY` and `ALIBABA_API_KEY` in the app's Secrets settings.")
-    st.stop()
-
-repo_url = st.text_input("repo", placeholder="https://github.com/owner/repo  —  paste any repo URL")
-
-if st.button("✨ Generate marketing bundle"):
-    if not repo_url.strip() or "github.com" not in repo_url:
-        st.error("Please paste a valid GitHub repo URL.")
-        st.stop()
-
-    out_dir = tempfile.mkdtemp(prefix="mktg_")
-    final, done = {}, []
-    steps_ph = st.empty()
-    steps_ph.markdown(render_steps(done, active="fetch_repo"), unsafe_allow_html=True)
-    for chunk in video_agent.stream({"repo_url": repo_url.strip(), "out_dir": out_dir}):
-        for node, update in chunk.items():
-            if update:
-                final.update(update)
-            done.append(node)
-            nxt = next((k for k, _, _ in STEPS if k not in done), None)
-            steps_ph.markdown(render_steps(done, active=nxt), unsafe_allow_html=True)
-    steps_ph.markdown(render_steps(done), unsafe_allow_html=True)
-
-    m = re.search(r"github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+)", repo_url)
-    repo_name = html.escape(m.group(2)) if m else "project"
-
-    # What the AI understood
-    brief = final.get("concept_brief", {})
-    with st.expander("🔍 What the AI understood about this repo"):
-        st.markdown(f"**{brief.get('one_liner', '')}**")
-        st.write(brief.get("concept", ""))
-        feats = brief.get("key_features", [])
-        if feats:
-            st.markdown("**Key features spotted in the code:**")
-            for f in feats:
-                st.markdown(f"- {f}")
-
-    # Demo pitch — dark feature card
-    demo = final.get("demo_pitch", {})
-    st.markdown('<div class="sec-title anim">🎤 The 2-Minute Demo Pitch</div>'
-                '<div class="sec-sub anim d1">Your voiceover-ready script, with full audio.</div>', unsafe_allow_html=True)
-    paras = "".join(f"<p class='script'>{html.escape(p.strip())}</p>"
-                    for p in demo.get("script", "").split("\n\n") if p.strip())
-    st.markdown(f"""<div class="demo-card anim d1"><div class="demo-kicker">★ FEATURED</div>
-        <h2>{html.escape(demo.get('title', 'Demo Pitch'))}</h2>
-        {paras}</div>""", unsafe_allow_html=True)
-    if demo.get("audio_path") and os.path.exists(demo["audio_path"]):
-        with open(demo["audio_path"], "rb") as f:
-            demo_bytes = f.read()
-        st.audio(demo_bytes, format="audio/mpeg")
-        st.download_button("⬇️ Download demo pitch audio", demo_bytes, file_name="demo_pitch.mp3")
-
-    # Pitch cards
-    st.markdown('<div class="sec-title anim">✨ Pitch Cards</div>'
-                '<div class="sec-sub anim d1">The three strongest angles, ready for your README or landing page.</div>',
-                unsafe_allow_html=True)
-    icons = ["⚡", "🎯", "💎"]
-    cards_html = "".join(
-        f"""<div class="pitch-card d{i+1}"><div class="icon">{icons[i % 3]}</div>
-            <h3>{html.escape(c.get('headline', ''))}</h3><p>{html.escape(c.get('sub', ''))}</p></div>"""
-        for i, c in enumerate(final.get("pitch_cards", [])))
-    st.markdown(f'<div class="pitch-grid">{cards_html}</div>', unsafe_allow_html=True)
-
-    # Social posts — phone mockups
-    st.markdown('<div class="sec-title anim">📱 Social Posts</div>'
-                '<div class="sec-sub anim d1">Hook, voiceover, AI visual, caption & hashtags — previewed like real posts.</div>',
-                unsafe_allow_html=True)
-    for i, post in enumerate(final.get("social_posts", []), 1):
-        img_tag = ""
-        img_bytes = None
-        if post.get("img_path") and os.path.exists(post["img_path"]):
-            with open(post["img_path"], "rb") as f:
-                img_bytes = f.read()
-            import base64 as _b64
-            img_tag = f'<img class="ig-img" src="data:image/png;base64,{_b64.b64encode(img_bytes).decode()}" />'
-        else:
-            img_tag = ('<div class="ig-img" style="display:flex;align-items:center;justify-content:center;'
-                       'color:#a1a1aa;font-size:13px;padding:20px;text-align:center;">'
-                       f'⚠ image failed<br>{html.escape(post.get("img_error", ""))[:120]}</div>')
-        cap_preview = html.escape(post.get("caption", "").split("\n")[0])[:110]
-        hook = html.escape(post.get("hook", ""))
-        st.markdown(f"""<div class="post-wrap d{(i % 3) + 1}">
-          <div class="post-num">POST {i}</div>
-          <div><div class="phone"><div class="phone-screen"><div class="notch"></div>
-            <div class="ig-head"><div class="ig-avatar">⚡</div><div class="ig-user">{repo_name}</div></div>
-            {img_tag}
-            <div class="ig-actions"><span>♡</span><span>💬</span><span>↗</span></div>
-            <div class="ig-cap"><b>{repo_name}</b> {cap_preview}…</div>
-          </div></div></div>
-          <div>
-            <div class="hook">🪝 {hook}</div>
-            <div class="vo-label">VOICEOVER SCRIPT</div>
-            <p class="vo-script">"{html.escape(post.get('script', ''))}"</p>
-            <div class="cap-label">CAPTION</div>
-            <p class="cap-text">{html.escape(post.get('caption', ''))}</p>
-            <div class="tags">{"".join(f'<span class="tag">{html.escape(t)}</span>' for t in post.get("hashtags", []))}</div>
-          </div>
-        </div>""", unsafe_allow_html=True)
-        a_bytes = None
-        if post.get("audio_path") and os.path.exists(post["audio_path"]):
-            with open(post["audio_path"], "rb") as f:
-                a_bytes = f.read()
-            st.audio(a_bytes, format="audio/mpeg")
-        c1, c2 = st.columns(2)
-        with c1:
-            if img_bytes:
-                st.download_button(f"⬇️ Image {i}", img_bytes, file_name=f"post_{i}.png", key=f"dl_img_{i}")
-        with c2:
-            if a_bytes:
-                st.download_button(f"⬇️ Voiceover {i}", a_bytes, file_name=f"post_{i}.mp3", key=f"dl_aud_{i}")
-
-st.markdown('<div class="footer">Built with <b>HypeRepo</b> 🚀 — paste a repo, ship the hype.</div>', unsafe_allow_html=True)
+# ================= DARK CTA + FOOTER =================
+st.html("""
+<div class="cta-dark">
+  <h2>Your repo deserves better<br>than <span class="serif-accent">a README.</span></h2>
+  <p>Paste a link above and walk away with a full launch kit — copy, visuals, voiceovers and a demo pitch. Free to try.</p>
+</div>
+<div class="footer"><div class="footer-inner">
+  <div class="logo">⚡ <span>HypeRepo</span></div>
+  <p>Built with <b>HypeRepo</b> — paste a repo, ship the hype. © 2026</p>
+</div></div>
+""")
