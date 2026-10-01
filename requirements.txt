@@ -1,0 +1,4 @@
+streamlit
+langgraph
+edge-tts
+requests
