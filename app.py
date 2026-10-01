@@ -168,13 +168,13 @@ st.html("""
   div[data-testid="stTextInput"] { max-width: 680px; margin: 36px auto 0; position: relative; z-index: 2; }
   div[data-testid="stTextInput"] label { display: none !important; }
   div[data-testid="stTextInput"] input {
-    border-radius: 16px !important; padding: 20px 28px !important;
+    border-radius: 999px !important; padding: 20px 30px !important;
     font-size: 15px !important; font-weight: 500 !important;
     border: 1.5px solid rgba(160,120,80,0.22) !important;
-    background: rgba(255,255,255,0.75) !important;
+    background: rgba(255,255,255,0.85) !important;
     backdrop-filter: blur(16px) !important;
     color: var(--espresso) !important;
-    box-shadow: 0 2px 16px rgba(160,120,80,0.1), inset 0 1px 0 rgba(255,255,255,0.8) !important;
+    box-shadow: 0 2px 16px rgba(160,120,80,0.1), inset 0 1px 0 rgba(255,255,255,0.9) !important;
     transition: border-color .25s, box-shadow .25s, background .25s !important;
     caret-color: var(--amber) !important;
   }
@@ -182,19 +182,22 @@ st.html("""
   div[data-testid="stTextInput"] input:focus {
     border-color: var(--caramel) !important;
     background: #fff !important;
-    box-shadow: 0 0 0 4px rgba(160,120,80,0.14), 0 8px 32px rgba(160,120,80,0.18) !important;
+    box-shadow: 0 0 0 5px rgba(160,120,80,0.12), 0 8px 32px rgba(160,120,80,0.18) !important;
   }
 
   /* ─── BUTTON ─── */
-  div[data-testid="stButton"] { text-align: center; margin-top: 20px; position: relative; z-index: 2; }
+  div[data-testid="stButton"] {
+    display: flex !important; justify-content: center !important;
+    margin-top: 22px; position: relative; z-index: 2;
+  }
   div[data-testid="stButton"] button {
     background: linear-gradient(135deg, var(--amber) 0%, var(--walnut) 60%, var(--espresso) 100%) !important;
-    color: #fff !important; border: none !important; border-radius: 14px !important;
-    padding: 18px 64px !important; font-size: 16px !important; font-weight: 700 !important;
+    color: #fff !important; border: none !important; border-radius: 999px !important;
+    padding: 18px 72px !important; font-size: 16px !important; font-weight: 700 !important;
     letter-spacing: -.01em !important;
     box-shadow: 0 8px 36px rgba(107,79,53,0.45), 0 2px 8px rgba(107,79,53,0.3) !important;
     transition: transform .2s cubic-bezier(.34,1.56,.64,1), box-shadow .2s ease !important;
-    position: relative; overflow: hidden; display: inline-block;
+    position: relative; overflow: hidden;
   }
   div[data-testid="stButton"] button::before {
     content: ''; position: absolute; inset: 0;
