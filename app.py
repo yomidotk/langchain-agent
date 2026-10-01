@@ -25,21 +25,40 @@ DO_URL = "https://inference.do-ai.run/v1/responses"
 DO_MODEL = "openai-gpt-oss-20b"
 
 # ================= BACKEND PIPELINE (the brain) =================
-def tts_to_mp3(text, out_path, voice="en-US-RogerNeural"):
-    """Returns None on success, or an error string on failure. Never raises,
-    so one bad voiceover can't silently kill the whole bundle."""
-    if not (text or "").strip():
-        return "empty script — nothing to narrate"
+# Voice settings — swap VOICE for any en-US voice name, e.g. "en-US-AvaMultilingualNeural"
+VOICE = "en-US-AndrewMultilingualNeural"
+VOICE_FALLBACK = "en-US-RogerNeural"
+
+def _to_ssml(text, voice):
+    """Light SSML: a dramatic pause after the hook + breathing room between paragraphs,
+    so the delivery has pacing instead of one flat robot run-on."""
+    paras = [html.escape(" ".join(p.split())) for p in text.split("\n\n") if p.strip()]
+    body = '<break time="600ms"/>'.join(paras)
+    body = re.sub(r"([.!?])\s+", r'\1<break time="450ms"/>', body, count=1)
+    return (f"<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>"
+            f"<voice name='{voice}'><prosody rate='+0%'>{body}</prosody></voice></speak>")
+
+def _synth(text, out_path, voice):
     try:
+        ssml = _to_ssml(text, voice)
         async def _main():
-            rate = "+0%" if len(text) > 500 else "+5%"
-            await edge_tts.Communicate(text, voice=voice, rate=rate).save(out_path)
+            await edge_tts.Communicate(ssml, voice=voice).save(out_path)
         asyncio.run(_main())
         if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
             return "TTS finished but produced no audio file"
         return None
     except Exception as e:
         return f"{type(e).__name__}: {e}"
+
+def tts_to_mp3(text, out_path, voice=VOICE):
+    """Returns None on success, or an error string on failure. Never raises,
+    so one bad voiceover can't silently kill the whole bundle."""
+    if not (text or "").strip():
+        return "empty script — nothing to narrate"
+    err = _synth(text, out_path, voice)
+    if err and voice != VOICE_FALLBACK:
+        err = _synth(text, out_path, VOICE_FALLBACK)
+    return err
 
 def do_call(prompt, max_tokens, temperature, _retry=True):
     response = requests.post(DO_URL,
@@ -76,7 +95,7 @@ def do_call(prompt, max_tokens, temperature, _retry=True):
 
 class AgentState(TypedDict):
     repo_url: str; out_dir: str; readme_text: str; repo_context: str; code_context: str
-    concept_brief: Dict; pitch_cards: List[Dict]; social_posts: List[Dict]; demo_pitch: Dict
+    concept_brief: Dict; pitch_cards: List[Dict]; social_posts: List[Dict]
 
 CODE_EXTS = (".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".rb", ".php", ".swift", ".kt")
 SKIP_DIRS = {"node_modules", ".git", "dist", "build", "__pycache__", ".next", "vendor", ".idea", ".vscode"}
@@ -163,6 +182,7 @@ def fetch_repo(state: AgentState):
             "repo_context": f"META: {meta}\nFILES: {tree}\n{manifest}",
             "code_context": "\n\n".join(code_chunks)}
 
+
 def understand_project(state: AgentState):
     prompt = f"""You are a senior staff engineer doing technical due diligence on an open-source project.
 Read the README, repo metadata, and source code excerpts below and explain the project like you truly understand it.
@@ -183,8 +203,11 @@ Output ONLY a valid JSON object matching this exact schema:
 "key_features": ["concrete feature with a specific detail", "up to 6 total, most impressive first"],
 "audience": "who this is for, specifically",
 "differentiator": "what makes it different from alternatives — or 'not clear from context' if honestly unknown",
-"vibe": "the project's personality/aesthetic in ~5 words"}}
-RULES: Only state what the context supports. Be concrete: name real commands, file types, behaviors from the code — never generic filler."""
+"vibe": "the project's personality/aesthetic in ~5 words",
+"strengths": ["concrete strength grounded in the code, up to 4, most impressive first"],
+"weaknesses": ["honest weakness, limitation, or missing piece visible from the context, up to 4"]}}
+RULES: Only state what the context supports. Be concrete: name real commands, file types, behaviors from the code — never generic filler.
+Strengths and weaknesses must be specific and technical — e.g. 'has zero tests', 'README lacks a usage example', 'setup needs 5 manual steps'. Never vague filler like 'could be more popular'."""
     return {"concept_brief": do_call(prompt, max_tokens=1500, temperature=0.2)}
 
 def draft_strategy(state: AgentState):
@@ -205,22 +228,7 @@ The 3 posts cover 3 angles IN ORDER: 1) the painful problem, 2) the magic moment
     package = do_call(posts_prompt, max_tokens=3000, temperature=0.3)
     cards = package.get("pitch_cards", [])
     norm_cards = [c if isinstance(c, dict) else {"headline": str(c), "sub": ""} for c in cards]
-    demo_prompt = f"""You are a demo-day pitch coach writing a spoken product demo.
-You already understand the project deeply. Concept brief:
-{brief_text}
-Write a FULL 2-minute spoken demo pitch: 260-300 words, paragraphs separated by blank lines.
-Structure IN ORDER:
-1) Cold-open hook — a surprising or painful truth (15s)
-2) The problem this project kills (25s)
-3) Narrated walkthrough — describe using it as if showing the screen, naming real UI elements and behaviors from the brief (50s)
-4) The 2-3 strongest features with concrete details from the brief (30s)
-5) Who it's for + call to action: star the repo, link below (15s)
-RULES: spoken word only — contractions, short sentences, concrete nouns. NO bullet points, NO stage directions, no invented features. BANNED: revolutionary, game-changing, cutting-edge, unlock, supercharge, seamless.
-Output ONLY a valid JSON object matching this exact schema:
-{{"demo_pitch": {{"title": "title of the 2-minute demo", "script": "..."}}}}"""
-    demo_data = do_call(demo_prompt, max_tokens=2000, temperature=0.3)
-    return {"pitch_cards": norm_cards, "social_posts": package.get("social_posts", []),
-            "demo_pitch": demo_data.get("demo_pitch", {})}
+    return {"pitch_cards": norm_cards, "social_posts": package.get("social_posts", [])}
 
 def generate_assets(state: AgentState):
     out_dir = state["out_dir"]
@@ -267,40 +275,24 @@ def generate_assets(state: AgentState):
         except Exception as e:
             post["img_path"] = None
             post["img_error"] = str(e)
-    demo = state.get("demo_pitch", {})
-    if demo.get("script"):
-        demo_path = os.path.join(out_dir, "demo_pitch.mp3")
-        d_err = tts_to_mp3(demo["script"], demo_path)
-        if d_err:
-            demo["audio_path"] = None
-            demo["audio_error"] = d_err
-        else:
-            demo["audio_path"] = demo_path
-            demo["audio_error"] = None
-    return {"social_posts": posts, "demo_pitch": demo}
-
-def build_dashboard(state: AgentState):
-    return {}
+    return {"social_posts": posts}
 
 workflow = StateGraph(AgentState)
 workflow.add_node("fetch_repo", fetch_repo)
 workflow.add_node("understand_project", understand_project)
 workflow.add_node("draft_strategy", draft_strategy)
 workflow.add_node("generate_assets", generate_assets)
-workflow.add_node("build_dashboard", build_dashboard)
 workflow.set_entry_point("fetch_repo")
 workflow.add_edge("fetch_repo", "understand_project")
 workflow.add_edge("understand_project", "draft_strategy")
 workflow.add_edge("draft_strategy", "generate_assets")
-workflow.add_edge("generate_assets", "build_dashboard")
-workflow.add_edge("build_dashboard", END)
+workflow.add_edge("generate_assets", END)
 video_agent = workflow.compile()
 
 STEPS = [("fetch_repo", "📥", "Reading repo"),
          ("understand_project", "🔬", "Understanding project"),
          ("draft_strategy", "🧠", "Writing copy"),
-         ("generate_assets", "🎨", "Images + voiceovers"),
-         ("build_dashboard", "📊", "Assembling")]
+         ("generate_assets", "🎨", "Images + voiceovers")]
 
 def render_steps(done, active=None):
     parts = []
@@ -309,227 +301,19 @@ def render_steps(done, active=None):
         mark = "✓" if key in done else icon
         parts.append(f'<div class="step {cls}"><div class="dot">{mark}</div>{label}</div>')
     return '<div class="steps">' + "".join(parts) + "</div>"
+_CSS = "\n<style>\n@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Sora:wght@400;600;700;800&family=Playfair+Display:ital,wght@1,500;1,600;1,700&display=swap');\n\n  :root {\n    --bg:#fff; --bg2:#F9FAFB; --bg3:#F3F4F6;\n    --border:#E5E7EB; --border2:#D1D5DB;\n    --text:#0A0A0A; --text2:#374151; --text3:#6B7280; --text4:#9CA3AF;\n    --green:#059669;\n  }\n  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}\n  *{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif!important;}\n  html{scroll-behavior:smooth;}\n  ::selection{background:#0A0A0A;color:#fff;}\n\n  .stApp{background:var(--bg)!important;min-height:100vh;}\n  #MainMenu,footer,header[data-testid=\"stHeader\"]{display:none!important;}\n  .block-container{max-width:1160px!important;padding:0 clamp(16px,4vw,48px) 100px!important;margin:0 auto!important;}\n  section[data-testid=\"stSidebar\"]{display:none!important;}\n\n  .bg-canvas,.grid-overlay,.orb,.noise{display:none;}\n\n  /* NAV */\n  .nav{position:sticky;top:0;z-index:100;background:rgba(255,255,255,0.92);backdrop-filter:blur(20px) saturate(180%);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);margin:0 clamp(-16px,-4vw,-48px);padding:0 clamp(16px,4vw,48px);}\n  .nav-inner{max-width:1160px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;height:60px;}\n  .logo{font-family:'Sora',sans-serif!important;font-weight:800;font-size:18px;letter-spacing:-.04em;color:var(--text);display:flex;align-items:center;gap:9px;}\n  .logo-icon{width:30px;height:30px;border-radius:8px;background:var(--text)!important;color:#fff!important;display:flex;align-items:center;justify-content:center;font-size:14px;}\n  .logo-text span{color:var(--text3);}\n  .nav-links{display:flex;align-items:center;gap:28px;}\n  .nav-links a{color:var(--text3);text-decoration:none;font-size:14px;font-weight:500;transition:color .15s;}\n  .nav-links a:hover{color:var(--text);}\n  .nav-badge{background:var(--bg3);border:1px solid var(--border);color:var(--text3);font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:6px;}\n  .nav-cta{background:var(--text)!important;color:#fff!important;text-decoration:none;font-size:13px;font-weight:600;padding:9px 20px;border-radius:8px;transition:opacity .15s;}\n  .nav-cta:hover{opacity:.82;}\n\n  /* HERO */\n  .hero{text-align:center;padding:clamp(80px,11vw,130px) 16px clamp(20px,4vw,40px);position:relative;z-index:2;}\n  .badge{display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:600;letter-spacing:.14em;color:var(--text3);background:var(--bg3);border:1px solid var(--border);padding:6px 14px;border-radius:999px;margin-bottom:28px;text-transform:uppercase;}\n  .pulse-dot{width:5px;height:5px;border-radius:50%;background:var(--green);box-shadow:0 0 0 2px rgba(5,150,105,.2);animation:pulse 2s ease-in-out infinite;}\n  .hero h1{font-family:'Sora',sans-serif!important;font-size:clamp(2.6rem,7vw,5.2rem);font-weight:800;letter-spacing:-.05em;line-height:1.03;color:var(--text);margin:0 0 22px;}\n  .serif-accent{font-family:'Playfair Display',Georgia,serif!important;font-style:italic;font-weight:600;letter-spacing:-.02em;color:var(--text3);}\n  .hero p.sub{font-size:clamp(.95rem,2.5vw,1.15rem);color:var(--text3);max-width:560px;margin:0 auto 8px;line-height:1.75;font-weight:400;}\n\n  /* INPUT */\n  div[data-testid=\"stTextInput\"]{max-width:660px;margin:32px auto 0;position:relative;z-index:2;}\n  div[data-testid=\"stTextInput\"] label{display:none!important;}\n  div[data-testid=\"stTextInput\"] input{border-radius:12px!important;padding:16px 22px!important;font-size:14.5px!important;font-weight:400!important;border:1px solid var(--border2)!important;background:var(--bg)!important;color:var(--text)!important;box-shadow:0 1px 3px rgba(0,0,0,.06)!important;transition:border-color .15s,box-shadow .15s!important;caret-color:var(--text)!important;}\n  div[data-testid=\"stTextInput\"] input::placeholder{color:var(--text4)!important;}\n  div[data-testid=\"stTextInput\"] input:focus{border-color:var(--text)!important;box-shadow:0 0 0 3px rgba(10,10,10,.08)!important;background:var(--bg)!important;}\n\n  /* BUTTON */\n  div[data-testid=\"stButton\"]{margin-top:14px;position:relative;z-index:2;}\n  div[data-testid=\"stButton\"] button{background:var(--text)!important;color:#fff!important;border:none!important;border-radius:12px!important;padding:16px 40px!important;font-size:14.5px!important;font-weight:600!important;letter-spacing:-.01em!important;box-shadow:0 1px 3px rgba(0,0,0,.12)!important;transition:opacity .15s,transform .15s!important;width:100%!important;}\n  div[data-testid=\"stButton\"] button p{color:#fff!important;}\n  div[data-testid=\"stButton\"] button:hover{opacity:.86!important;transform:translateY(-1px)!important;box-shadow:0 4px 12px rgba(0,0,0,.15)!important;}\n\n  /* STATS */\n  .stats{display:flex;justify-content:center;align-items:center;margin:64px auto 0;max-width:780px;position:relative;z-index:2;border:1px solid var(--border);border-radius:16px;flex-wrap:wrap;overflow:hidden;background:var(--bg2);}\n  .stat{text-align:center;padding:24px 40px;flex:1;min-width:120px;}\n  .stat+.stat{border-left:1px solid var(--border);}\n  .stat b{display:block;font-size:32px;font-weight:800;letter-spacing:-.04em;color:var(--text);margin-bottom:4px;}\n  .stat span{font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--text4);}\n\n  /* TICKER */\n  .ticker{margin:64px clamp(-16px,-4vw,-48px) 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:var(--bg2);overflow:hidden;position:relative;z-index:2;}\n  .ticker-track{display:flex;gap:0;width:max-content;animation:tick 32s linear infinite;padding:15px 0;}\n  .ticker:hover .ticker-track{animation-play-state:paused;}\n  .tick{font-size:11px;font-weight:700;letter-spacing:.22em;color:var(--text4);padding:0 28px;white-space:nowrap;text-transform:uppercase;}\n  .tick em{font-style:normal;color:var(--text3);padding-right:28px;}\n  @keyframes tick{to{transform:translateX(-50%);}}\n\n  /* SECTIONS */\n  .section{max-width:1100px;margin:0 auto;padding:clamp(80px,10vw,112px) 0 0;position:relative;z-index:2;}\n  .kicker{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:var(--text3);margin-bottom:14px;}\n  .kicker::before{content:'';width:16px;height:1px;background:var(--border2);}\n  .sec-h{font-family:'Sora',sans-serif!important;font-size:clamp(1.8rem,4.5vw,2.9rem);font-weight:800;letter-spacing:-.04em;color:var(--text);margin:0 0 14px;line-height:1.1;}\n  .sec-p{color:var(--text3);font-size:16px;line-height:1.75;max-width:560px;margin:0 0 44px;font-weight:400;}\n\n  /* HOW IT WORKS */\n  .how-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border);border:1px solid var(--border);border-radius:20px;overflow:hidden;}\n  .how-card{background:var(--bg);padding:36px 30px;transition:background .2s;}\n  .how-card:hover{background:var(--bg2);}\n  .how-card::before{display:none;}\n  .how-num{font-size:12px;font-weight:700;letter-spacing:.06em;color:var(--text4);margin-bottom:18px;}\n  .how-card h3{font-size:16px;font-weight:700;margin:0 0 9px;color:var(--text);letter-spacing:-.01em;}\n  .how-card p{font-size:14px;color:var(--text3);line-height:1.7;margin:0;}\n\n  /* BUNDLE */\n  .bundle-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;}\n  .bundle-card{background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:28px 26px;transition:border-color .2s,box-shadow .2s;position:relative;overflow:hidden;}\n  .bundle-card::after{display:none;}\n  .bundle-card:hover{border-color:var(--border2);box-shadow:0 4px 24px rgba(0,0,0,.06);}\n  .bundle-icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;background:var(--bg);border:1px solid var(--border);margin-bottom:18px;}\n  .bundle-card h3{font-size:15px;font-weight:700;margin:0 0 7px;color:var(--text);letter-spacing:-.01em;}\n  .bundle-card p{font-size:13.5px;color:var(--text3);line-height:1.65;margin:0;}\n\n  /* STEPS */\n  .steps{display:flex;gap:6px;justify-content:center;margin:40px auto 16px;max-width:1000px;position:relative;z-index:2;flex-wrap:wrap;}\n  .step{display:flex;align-items:center;gap:9px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:10px 16px 10px 10px;font-size:12.5px;font-weight:600;color:var(--text4);transition:all .25s;}\n  .step .dot{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;background:var(--bg3);font-size:13px;flex-shrink:0;}\n  .step.done{color:var(--green);border-color:rgba(5,150,105,.2);background:rgba(5,150,105,.04);}\n  .step.done .dot{background:rgba(5,150,105,.1);}\n  .step.active{color:var(--text);border-color:var(--border2);background:var(--bg);box-shadow:0 2px 8px rgba(0,0,0,.08);}\n  .step.active .dot{background:var(--text);color:#fff;animation:pulse 1.4s ease-in-out infinite;}\n  @keyframes pulse{0%,100%{transform:scale(1);opacity:1;}50%{transform:scale(1.1);opacity:.8;}}\n\n  /* RESULTS */\n  .sec-title{font-family:'Sora',sans-serif!important;font-size:clamp(1.5rem,3.5vw,2rem);font-weight:800;letter-spacing:-.035em;color:var(--text);margin:72px 0 6px;position:relative;z-index:2;}\n  .sec-sub{color:var(--text3);margin-bottom:24px;position:relative;z-index:2;font-size:14.5px;}\n  .demo-card{background:var(--text);border-radius:20px;padding:clamp(28px,4vw,52px);color:#fff;position:relative;overflow:hidden;z-index:2;box-shadow:0 20px 60px -16px rgba(0,0,0,.3);margin-top:16px;}\n  .demo-card::before,.demo-card::after{display:none;}\n  .demo-kicker{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;letter-spacing:.16em;color:rgba(255,255,255,.45);margin-bottom:14px;position:relative;z-index:1;border:1px solid rgba(255,255,255,.12);padding:5px 12px;border-radius:999px;}\n  .demo-card h2{font-family:'Sora',sans-serif!important;font-size:clamp(1.4rem,3.5vw,2rem);font-weight:800;margin:0 0 20px;position:relative;z-index:1;letter-spacing:-.03em;color:#fff;}\n  .demo-card p.script{color:rgba(255,255,255,.65);line-height:1.85;font-size:15.5px;position:relative;z-index:1;margin-bottom:14px;font-weight:400;}\n\n  /* PITCH */\n  .pitch-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;position:relative;z-index:2;}\n  .pitch-card{background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:28px 24px;position:relative;overflow:hidden;animation:fadeUp .5s cubic-bezier(.22,1,.36,1) both;transition:border-color .2s,box-shadow .2s;}\n  .pitch-card:hover{border-color:var(--border2);box-shadow:0 4px 24px rgba(0,0,0,.06);}\n  .pitch-card::before{display:none;}\n  /* HONEST REVIEW */\n  .sw-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:26px 0 8px;position:relative;z-index:2;}\n  .sw-card{background:var(--bg2);border:1px solid var(--border);border-radius:18px;padding:28px 26px;animation:fadeUp .5s cubic-bezier(.22,1,.36,1) both;transition:border-color .2s,box-shadow .2s;}\n  .sw-card:hover{border-color:var(--border2);box-shadow:0 4px 24px rgba(0,0,0,.06);}\n  .sw-card.strengths{border-top:3px solid var(--green);}\n  .sw-card.weaknesses{border-top:3px solid #DC2626;}\n  .sw-card h3{font-family:'Sora',sans-serif;font-size:17px;margin:0 0 16px;letter-spacing:-.01em;}\n  .sw-card ul{margin:0;padding:0;list-style:none;display:grid;gap:12px;}\n  .sw-card li{font-size:14.5px;line-height:1.6;color:var(--text2);padding-left:28px;position:relative;}\n  .sw-card.strengths li::before{content:\"\u2705\";position:absolute;left:0;top:0;}\n  .sw-card.weaknesses li::before{content:\"\u26a0\ufe0f\";position:absolute;left:0;top:0;}\n  .pitch-card .icon{font-size:28px;margin-bottom:14px;}\n  .pitch-card h3{font-size:15px;font-weight:700;color:var(--text);margin:0 0 8px;letter-spacing:-.01em;}\n  .pitch-card p{font-size:13.5px;color:var(--text3);line-height:1.65;margin:0;}\n\n  /* SOCIAL */\n  .post-wrap{display:grid;grid-template-columns:280px 1fr;gap:36px;align-items:start;background:var(--bg2);border:1px solid var(--border);border-radius:20px;padding:clamp(24px,4vw,40px);margin-bottom:20px;position:relative;z-index:2;animation:fadeUp .5s cubic-bezier(.22,1,.36,1) both;transition:border-color .2s,box-shadow .2s;}\n  .post-wrap:hover{border-color:var(--border2);box-shadow:0 4px 24px rgba(0,0,0,.06);}\n  .post-num{position:absolute;top:-12px;left:24px;background:var(--text);color:#fff;font-size:10.5px;font-weight:700;letter-spacing:.1em;padding:5px 14px;border-radius:999px;}\n  .post-img-wrap{border-radius:18px;overflow:hidden;border:1px solid var(--border);background:var(--bg3);\n    box-shadow:0 18px 40px -16px rgba(0,0,0,.22);\n    transition:transform .35s cubic-bezier(.22,1,.36,1),box-shadow .35s cubic-bezier(.22,1,.36,1);}\n  .post-img-wrap:hover{transform:translateY(-7px) scale(1.015);box-shadow:0 30px 60px -18px rgba(0,0,0,.3);}\n  .post-img{width:100%;aspect-ratio:1/1;object-fit:cover;display:block;background:var(--bg3);}\n  .hook{font-family:'Sora',sans-serif!important;font-size:clamp(1.2rem,3vw,1.65rem);font-weight:800;color:var(--text);letter-spacing:-.03em;margin:0 0 18px;line-height:1.2;}\n  .vo-label,.cap-label{font-size:10px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:var(--text4);margin:22px 0 7px;display:flex;align-items:center;gap:7px;}\n  .vo-label::after,.cap-label::after{content:'';flex:1;height:1px;background:var(--border);}\n  .vo-script{font-size:14.5px;color:var(--text3);font-style:italic;line-height:1.75;border-left:2px solid var(--border2);padding-left:14px;margin:0 0 8px;}\n  .cap-text{font-size:13.5px;color:var(--text3);line-height:1.7;white-space:pre-line;}\n  .tags{margin-top:14px;display:flex;flex-wrap:wrap;gap:5px;}\n  .tag{background:var(--bg3);color:var(--text3);font-size:11.5px;font-weight:600;padding:4px 10px;border-radius:6px;border:1px solid var(--border);transition:all .15s;}\n  .tag:hover{background:var(--border);color:var(--text);transform:translateY(-1px);}\n\n  /* DOWNLOAD */\n  div[data-testid=\"stDownloadButton\"] button{border-radius:9px!important;font-weight:600!important;border:1px solid var(--border)!important;color:var(--text2)!important;background:var(--bg2)!important;padding:9px 18px!important;font-size:13px!important;width:100%;transition:all .15s;letter-spacing:-.01em!important;}\n  div[data-testid=\"stDownloadButton\"] button:hover{background:var(--bg3)!important;border-color:var(--border2)!important;color:var(--text)!important;transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.06);}\n\n  /* EXPANDER */\n  div[data-testid=\"stExpander\"]{border:1px solid var(--border)!important;border-radius:14px!important;background:var(--bg2)!important;position:relative;z-index:2;}\n\n  /* CTA */\n  .cta-dark{margin:100px auto 0;max-width:1100px;background:var(--text);border-radius:24px;padding:clamp(48px,7vw,84px);text-align:center;position:relative;overflow:hidden;z-index:2;}\n  .cta-dark::before,.cta-dark::after{display:none;}\n  .cta-dark h2{font-family:'Sora',sans-serif!important;color:#fff;font-size:clamp(1.9rem,5vw,3.2rem);font-weight:800;letter-spacing:-.04em;margin:0 0 14px;position:relative;z-index:1;line-height:1.1;}\n  .cta-dark p{color:rgba(255,255,255,.5);font-size:16px;max-width:500px;margin:0 auto;line-height:1.75;position:relative;z-index:1;font-weight:400;}\n\n  /* FOOTER */\n  .footer{margin-top:80px;border-top:1px solid var(--border);padding:36px 0 18px;position:relative;z-index:2;}\n  .footer-inner{max-width:1100px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;}\n  .footer .logo{font-size:16px;}\n  .footer p{color:var(--text4);font-size:13px;margin:0;}\n  .footer p b{color:var(--text3);font-weight:600;}\n\n  /* ANIMATIONS */\n  @keyframes fadeUp{from{opacity:0;transform:translateY(20px);}to{opacity:1;transform:none;}}\n  .anim{animation:fadeUp .7s cubic-bezier(.22,1,.36,1) both;}\n  .d1{animation-delay:.08s;}.d2{animation-delay:.16s;}.d3{animation-delay:.24s;}.d4{animation-delay:.32s;}\n\n  /* STREAMLIT */\n  div[data-testid=\"stAudio\"]{border-radius:10px;overflow:hidden;border:1px solid var(--border);}\n  div[data-testid=\"stMarkdownContainer\"]{color:var(--text2)!important;}\n  div[data-testid=\"stMarkdownContainer\"] strong{color:var(--text)!important;}\n  div[data-testid=\"stMarkdownContainer\"] em{color:var(--text3)!important;}\n  .stAlert{border-radius:10px!important;border:1px solid var(--border)!important;background:var(--bg2)!important;}\n\n  /* RESPONSIVE */\n  @media(max-width:900px){\n    .nav{margin:0 -16px;padding:0 16px;}\n    .nav-links{display:none;}\n    .pitch-grid,.how-grid,.bundle-grid,.sw-grid{grid-template-columns:1fr;}\n    .how-grid{gap:0;}\n    .post-wrap{grid-template-columns:1fr;}\n    .stat{padding:18px 20px;}\n    .ticker{margin:56px -16px 0;}\n    .stats{border-radius:14px;}\n  }\n</style>\n<div class=\"bg-canvas\"></div>\n<div class=\"grid-overlay\"></div>\n<div class=\"orb orb-1\"></div>\n<div class=\"orb orb-2\"></div>\n<div class=\"orb orb-3\"></div>\n<div class=\"noise\"></div>\n"
+_NAV = "\n<nav class=\"nav\"><div class=\"nav-inner\">\n  <div class=\"logo\">\n    <div class=\"logo-icon\">\u26a1</div>\n    <div class=\"logo-text\">Hype<span>Repo</span></div>\n  </div>\n  <div class=\"nav-links\">\n    <a href=\"#how\">How it works</a>\n    <a href=\"#bundle\">What you get</a>\n    <span class=\"nav-badge\">AI-Powered</span>\n  </div>\n  <a class=\"nav-cta\" href=\"#top\">Generate Kit \u2726</a>\n</div></nav>\n"
+_HERO = "\n<div class=\"hero\" id=\"top\">\n  <div class=\"badge anim\"><span class=\"pulse-dot\"></span>AI Marketing Agent &nbsp;\u00b7&nbsp; Zero setup</div>\n  <h1 class=\"anim d1\">Turn any repo into<br><span class=\"serif-accent\">a full launch kit.</span></h1>\n  <p class=\"sub anim d2\">Paste a GitHub URL and walk away with pitch cards, social posts with AI visuals, voiceovers, and an honest strengths-vs-weaknesses review \u2014 generated from your actual code, not a template.</p>\n</div>\n"
+_STATS = "\n<div class=\"stats anim\">\n  <div class=\"stat\"><b>3</b><span>AI visuals</span></div>\n  <div class=\"stat\"><b>3</b><span>Voiceovers</span></div>\n  <div class=\"stat\"><b>3</b><span>Pitch cards</span></div>\n  <div class=\"stat\"><b>1</b><span>Honest review</span></div>\n</div>\n"
+_TICKER = "\n<div class=\"ticker\"><div class=\"ticker-track\">\n  <span class=\"tick\"><em>\u2726</em>PITCH CARDS</span><span class=\"tick\"><em>\u2726</em>AI VOICEOVERS</span><span class=\"tick\"><em>\u2726</em>SCROLL-STOPPING VISUALS</span><span class=\"tick\"><em>\u2726</em>STRENGTHS & WEAKNESSES</span><span class=\"tick\"><em>\u2726</em>CAPTIONS & HASHTAGS</span><span class=\"tick\"><em>\u2726</em>ZERO EDITING NEEDED</span>\n  <span class=\"tick\"><em>\u2726</em>PITCH CARDS</span><span class=\"tick\"><em>\u2726</em>AI VOICEOVERS</span><span class=\"tick\"><em>\u2726</em>SCROLL-STOPPING VISUALS</span><span class=\"tick\"><em>\u2726</em>STRENGTHS & WEAKNESSES</span><span class=\"tick\"><em>\u2726</em>CAPTIONS & HASHTAGS</span><span class=\"tick\"><em>\u2726</em>ZERO EDITING NEEDED</span>\n</div></div>\n"
+_HOW = "\n<div class=\"section\" id=\"how\">\n  <div class=\"kicker\">HOW IT WORKS</div>\n  <div class=\"sec-h\">Repo link to launch kit<br>in under five minutes.</div>\n  <p class=\"sec-p\">No prompts. No templates. A five-stage AI pipeline reads your code, understands what you built, then writes, designs, and records everything.</p>\n  <div class=\"how-grid\">\n    <div class=\"how-card anim\"><div class=\"how-num\">01</div><h3>\ud83d\udd17 Paste your repo URL</h3><p>Drop any public GitHub URL. The agent fetches your README, repo metadata, and actual source files \u2014 not just the docs.</p></div>\n    <div class=\"how-card anim d1\"><div class=\"how-num\">02</div><h3>\ud83e\udde0 Deep code analysis</h3><p>A senior-engineer-grade LLM builds a concept brief: what you built, how it works, who it's for, and what makes it genuinely different.</p></div>\n    <div class=\"how-card anim d2\"><div class=\"how-num\">03</div><h3>\ud83d\ude80 Ship the full kit</h3><p>Pitch cards, social posts with AI visuals and voiceovers, plus an honest strengths-and-weaknesses breakdown. One click to download all.</p></div>\n  </div>\n</div>\n"
+_BUNDLE = "\n<div class=\"section\" id=\"bundle\">\n  <div class=\"kicker\">WHAT YOU GET</div>\n  <div class=\"sec-h\">Everything a launch needs.<br>Nothing it doesn't.</div>\n  <p class=\"sec-p\">Every asset is grounded in your actual code \u2014 never generic filler. Built from a real concept brief, not a template.</p>\n  <div class=\"bundle-grid\">\n    <div class=\"bundle-card anim\"><div class=\"bundle-icon\">\u2728</div><h3>Pitch Cards</h3><p>Three razor-sharp angles with concrete proof points \u2014 ready for your README or landing page hero.</p></div>\n    <div class=\"bundle-card anim d1\"><div class=\"bundle-icon\">\ud83d\udcf1</div><h3>Social Posts</h3><p>Problem \u2192 magic moment \u2192 proof. Scroll-stopping hooks, captions, and hashtags \u2014 three distinct angles.</p></div>\n    <div class=\"bundle-card anim d2\"><div class=\"bundle-icon\">\ud83c\udfa8</div><h3>AI Visuals</h3><p>Custom 1:1 promo graphics per post, generated from prompts based on your project's real subject matter.</p></div>\n    <div class=\"bundle-card anim d3\"><div class=\"bundle-icon\">\ud83c\udf99\ufe0f</div><h3>Voiceovers</h3><p>Natural-sounding AI narration for every post \u2014 no microphone, no studio needed.</p></div>\n    <div class=\"bundle-card anim d4\"><div class=\"bundle-icon\">\u2696\ufe0f</div><h3>Honest Review</h3><p>Brutally honest strengths and weaknesses, grounded in your actual code \u2014 what to brag about, what to fix.</p></div>\n    <div class=\"bundle-card anim\"><div class=\"bundle-icon\">\u2b07\ufe0f</div><h3>Instant Download Kit</h3><p>Every image and MP3 is one click away. Take the whole bundle straight to your content scheduler.</p></div>\n  </div>\n</div>\n"
+_CTA = "\n<div class=\"cta-dark\">\n  <h2>Your repo deserves more<br>than <span class=\"serif-accent\">a README.</span></h2>\n  <p>Paste a link above and walk away with a complete launch kit \u2014 copy, visuals, voiceovers, and an honest review. Powered by real code analysis.</p>\n</div>\n<div class=\"footer\"><div class=\"footer-inner\">\n  <div class=\"logo\">\n    <div class=\"logo-icon\">\u26a1</div>\n    <div class=\"logo-text\">Hype<span>Repo</span></div>\n  </div>\n  <p>Built with <b>HypeRepo</b> \u2014 paste a repo, ship the hype. \u00a9 2026</p>\n</div></div>\n"
 
 # ================= DESIGN SYSTEM =================
-st.html("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Sora:wght@400;600;700;800&family=Playfair+Display:ital,wght@1,500;1,600;1,700&display=swap');
-
-  :root {
-    --bg:#fff; --bg2:#F9FAFB; --bg3:#F3F4F6;
-    --border:#E5E7EB; --border2:#D1D5DB;
-    --text:#0A0A0A; --text2:#374151; --text3:#6B7280; --text4:#9CA3AF;
-    --green:#059669;
-  }
-  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
-  *{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif!important;}
-  html{scroll-behavior:smooth;}
-  ::selection{background:#0A0A0A;color:#fff;}
-
-  .stApp{background:var(--bg)!important;min-height:100vh;}
-  #MainMenu,footer,header[data-testid="stHeader"]{display:none!important;}
-  .block-container{max-width:1160px!important;padding:0 clamp(16px,4vw,48px) 100px!important;margin:0 auto!important;}
-  section[data-testid="stSidebar"]{display:none!important;}
-
-  .bg-canvas,.grid-overlay,.orb,.noise{display:none;}
-
-  /* NAV */
-  .nav{position:sticky;top:0;z-index:100;background:rgba(255,255,255,0.92);backdrop-filter:blur(20px) saturate(180%);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);margin:0 clamp(-16px,-4vw,-48px);padding:0 clamp(16px,4vw,48px);}
-  .nav-inner{max-width:1160px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;height:60px;}
-  .logo{font-family:'Sora',sans-serif!important;font-weight:800;font-size:18px;letter-spacing:-.04em;color:var(--text);display:flex;align-items:center;gap:9px;}
-  .logo-icon{width:30px;height:30px;border-radius:8px;background:var(--text)!important;color:#fff!important;display:flex;align-items:center;justify-content:center;font-size:14px;}
-  .logo-text span{color:var(--text3);}
-  .nav-links{display:flex;align-items:center;gap:28px;}
-  .nav-links a{color:var(--text3);text-decoration:none;font-size:14px;font-weight:500;transition:color .15s;}
-  .nav-links a:hover{color:var(--text);}
-  .nav-badge{background:var(--bg3);border:1px solid var(--border);color:var(--text3);font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:6px;}
-  .nav-cta{background:var(--text)!important;color:#fff!important;text-decoration:none;font-size:13px;font-weight:600;padding:9px 20px;border-radius:8px;transition:opacity .15s;}
-  .nav-cta:hover{opacity:.82;}
-
-  /* HERO */
-  .hero{text-align:center;padding:clamp(80px,11vw,130px) 16px clamp(20px,4vw,40px);position:relative;z-index:2;}
-  .badge{display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:600;letter-spacing:.14em;color:var(--text3);background:var(--bg3);border:1px solid var(--border);padding:6px 14px;border-radius:999px;margin-bottom:28px;text-transform:uppercase;}
-  .pulse-dot{width:5px;height:5px;border-radius:50%;background:var(--green);box-shadow:0 0 0 2px rgba(5,150,105,.2);animation:pulse 2s ease-in-out infinite;}
-  .hero h1{font-family:'Sora',sans-serif!important;font-size:clamp(2.6rem,7vw,5.2rem);font-weight:800;letter-spacing:-.05em;line-height:1.03;color:var(--text);margin:0 0 22px;}
-  .serif-accent{font-family:'Playfair Display',Georgia,serif!important;font-style:italic;font-weight:600;letter-spacing:-.02em;color:var(--text3);}
-  .hero p.sub{font-size:clamp(.95rem,2.5vw,1.15rem);color:var(--text3);max-width:560px;margin:0 auto 8px;line-height:1.75;font-weight:400;}
-
-  /* INPUT */
-  div[data-testid="stTextInput"]{max-width:660px;margin:32px auto 0;position:relative;z-index:2;}
-  div[data-testid="stTextInput"] label{display:none!important;}
-  div[data-testid="stTextInput"] input{border-radius:12px!important;padding:16px 22px!important;font-size:14.5px!important;font-weight:400!important;border:1px solid var(--border2)!important;background:var(--bg)!important;color:var(--text)!important;box-shadow:0 1px 3px rgba(0,0,0,.06)!important;transition:border-color .15s,box-shadow .15s!important;caret-color:var(--text)!important;}
-  div[data-testid="stTextInput"] input::placeholder{color:var(--text4)!important;}
-  div[data-testid="stTextInput"] input:focus{border-color:var(--text)!important;box-shadow:0 0 0 3px rgba(10,10,10,.08)!important;background:var(--bg)!important;}
-
-  /* BUTTON */
-  div[data-testid="stButton"]{margin-top:14px;position:relative;z-index:2;}
-  div[data-testid="stButton"] button{background:var(--text)!important;color:#fff!important;border:none!important;border-radius:12px!important;padding:16px 40px!important;font-size:14.5px!important;font-weight:600!important;letter-spacing:-.01em!important;box-shadow:0 1px 3px rgba(0,0,0,.12)!important;transition:opacity .15s,transform .15s!important;width:100%!important;}
-  div[data-testid="stButton"] button p{color:#fff!important;}
-  div[data-testid="stButton"] button:hover{opacity:.86!important;transform:translateY(-1px)!important;box-shadow:0 4px 12px rgba(0,0,0,.15)!important;}
-
-  /* STATS */
-  .stats{display:flex;justify-content:center;align-items:center;margin:64px auto 0;max-width:780px;position:relative;z-index:2;border:1px solid var(--border);border-radius:16px;flex-wrap:wrap;overflow:hidden;background:var(--bg2);}
-  .stat{text-align:center;padding:24px 40px;flex:1;min-width:120px;}
-  .stat+.stat{border-left:1px solid var(--border);}
-  .stat b{display:block;font-size:32px;font-weight:800;letter-spacing:-.04em;color:var(--text);margin-bottom:4px;}
-  .stat span{font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--text4);}
-
-  /* TICKER */
-  .ticker{margin:64px clamp(-16px,-4vw,-48px) 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:var(--bg2);overflow:hidden;position:relative;z-index:2;}
-  .ticker-track{display:flex;gap:0;width:max-content;animation:tick 32s linear infinite;padding:15px 0;}
-  .ticker:hover .ticker-track{animation-play-state:paused;}
-  .tick{font-size:11px;font-weight:700;letter-spacing:.22em;color:var(--text4);padding:0 28px;white-space:nowrap;text-transform:uppercase;}
-  .tick em{font-style:normal;color:var(--text3);padding-right:28px;}
-  @keyframes tick{to{transform:translateX(-50%);}}
-
-  /* SECTIONS */
-  .section{max-width:1100px;margin:0 auto;padding:clamp(80px,10vw,112px) 0 0;position:relative;z-index:2;}
-  .kicker{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:var(--text3);margin-bottom:14px;}
-  .kicker::before{content:'';width:16px;height:1px;background:var(--border2);}
-  .sec-h{font-family:'Sora',sans-serif!important;font-size:clamp(1.8rem,4.5vw,2.9rem);font-weight:800;letter-spacing:-.04em;color:var(--text);margin:0 0 14px;line-height:1.1;}
-  .sec-p{color:var(--text3);font-size:16px;line-height:1.75;max-width:560px;margin:0 0 44px;font-weight:400;}
-
-  /* HOW IT WORKS */
-  .how-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border);border:1px solid var(--border);border-radius:20px;overflow:hidden;}
-  .how-card{background:var(--bg);padding:36px 30px;transition:background .2s;}
-  .how-card:hover{background:var(--bg2);}
-  .how-card::before{display:none;}
-  .how-num{font-size:12px;font-weight:700;letter-spacing:.06em;color:var(--text4);margin-bottom:18px;}
-  .how-card h3{font-size:16px;font-weight:700;margin:0 0 9px;color:var(--text);letter-spacing:-.01em;}
-  .how-card p{font-size:14px;color:var(--text3);line-height:1.7;margin:0;}
-
-  /* BUNDLE */
-  .bundle-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;}
-  .bundle-card{background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:28px 26px;transition:border-color .2s,box-shadow .2s;position:relative;overflow:hidden;}
-  .bundle-card::after{display:none;}
-  .bundle-card:hover{border-color:var(--border2);box-shadow:0 4px 24px rgba(0,0,0,.06);}
-  .bundle-icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;background:var(--bg);border:1px solid var(--border);margin-bottom:18px;}
-  .bundle-card h3{font-size:15px;font-weight:700;margin:0 0 7px;color:var(--text);letter-spacing:-.01em;}
-  .bundle-card p{font-size:13.5px;color:var(--text3);line-height:1.65;margin:0;}
-
-  /* STEPS */
-  .steps{display:flex;gap:6px;justify-content:center;margin:40px auto 16px;max-width:1000px;position:relative;z-index:2;flex-wrap:wrap;}
-  .step{display:flex;align-items:center;gap:9px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:10px 16px 10px 10px;font-size:12.5px;font-weight:600;color:var(--text4);transition:all .25s;}
-  .step .dot{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;background:var(--bg3);font-size:13px;flex-shrink:0;}
-  .step.done{color:var(--green);border-color:rgba(5,150,105,.2);background:rgba(5,150,105,.04);}
-  .step.done .dot{background:rgba(5,150,105,.1);}
-  .step.active{color:var(--text);border-color:var(--border2);background:var(--bg);box-shadow:0 2px 8px rgba(0,0,0,.08);}
-  .step.active .dot{background:var(--text);color:#fff;animation:pulse 1.4s ease-in-out infinite;}
-  @keyframes pulse{0%,100%{transform:scale(1);opacity:1;}50%{transform:scale(1.1);opacity:.8;}}
-
-  /* RESULTS */
-  .sec-title{font-family:'Sora',sans-serif!important;font-size:clamp(1.5rem,3.5vw,2rem);font-weight:800;letter-spacing:-.035em;color:var(--text);margin:72px 0 6px;position:relative;z-index:2;}
-  .sec-sub{color:var(--text3);margin-bottom:24px;position:relative;z-index:2;font-size:14.5px;}
-  .demo-card{background:var(--text);border-radius:20px;padding:clamp(28px,4vw,52px);color:#fff;position:relative;overflow:hidden;z-index:2;box-shadow:0 20px 60px -16px rgba(0,0,0,.3);margin-top:16px;}
-  .demo-card::before,.demo-card::after{display:none;}
-  .demo-kicker{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;letter-spacing:.16em;color:rgba(255,255,255,.45);margin-bottom:14px;position:relative;z-index:1;border:1px solid rgba(255,255,255,.12);padding:5px 12px;border-radius:999px;}
-  .demo-card h2{font-family:'Sora',sans-serif!important;font-size:clamp(1.4rem,3.5vw,2rem);font-weight:800;margin:0 0 20px;position:relative;z-index:1;letter-spacing:-.03em;color:#fff;}
-  .demo-card p.script{color:rgba(255,255,255,.65);line-height:1.85;font-size:15.5px;position:relative;z-index:1;margin-bottom:14px;font-weight:400;}
-
-  /* PITCH */
-  .pitch-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;position:relative;z-index:2;}
-  .pitch-card{background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:28px 24px;position:relative;overflow:hidden;animation:fadeUp .5s cubic-bezier(.22,1,.36,1) both;transition:border-color .2s,box-shadow .2s;}
-  .pitch-card:hover{border-color:var(--border2);box-shadow:0 4px 24px rgba(0,0,0,.06);}
-  .pitch-card::before{display:none;}
-  .pitch-card .icon{font-size:28px;margin-bottom:14px;}
-  .pitch-card h3{font-size:15px;font-weight:700;color:var(--text);margin:0 0 8px;letter-spacing:-.01em;}
-  .pitch-card p{font-size:13.5px;color:var(--text3);line-height:1.65;margin:0;}
-
-  /* SOCIAL */
-  .post-wrap{display:grid;grid-template-columns:280px 1fr;gap:36px;align-items:start;background:var(--bg2);border:1px solid var(--border);border-radius:20px;padding:clamp(24px,4vw,40px);margin-bottom:20px;position:relative;z-index:2;animation:fadeUp .5s cubic-bezier(.22,1,.36,1) both;transition:border-color .2s,box-shadow .2s;}
-  .post-wrap:hover{border-color:var(--border2);box-shadow:0 4px 24px rgba(0,0,0,.06);}
-  .post-num{position:absolute;top:-12px;left:24px;background:var(--text);color:#fff;font-size:10.5px;font-weight:700;letter-spacing:.1em;padding:5px 14px;border-radius:999px;}
-  .post-img-wrap{border-radius:18px;overflow:hidden;border:1px solid var(--border);background:var(--bg3);
-    box-shadow:0 18px 40px -16px rgba(0,0,0,.22);
-    transition:transform .35s cubic-bezier(.22,1,.36,1),box-shadow .35s cubic-bezier(.22,1,.36,1);}
-  .post-img-wrap:hover{transform:translateY(-7px) scale(1.015);box-shadow:0 30px 60px -18px rgba(0,0,0,.3);}
-  .post-img{width:100%;aspect-ratio:1/1;object-fit:cover;display:block;background:var(--bg3);}
-  .hook{font-family:'Sora',sans-serif!important;font-size:clamp(1.2rem,3vw,1.65rem);font-weight:800;color:var(--text);letter-spacing:-.03em;margin:0 0 18px;line-height:1.2;}
-  .vo-label,.cap-label{font-size:10px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:var(--text4);margin:22px 0 7px;display:flex;align-items:center;gap:7px;}
-  .vo-label::after,.cap-label::after{content:'';flex:1;height:1px;background:var(--border);}
-  .vo-script{font-size:14.5px;color:var(--text3);font-style:italic;line-height:1.75;border-left:2px solid var(--border2);padding-left:14px;margin:0 0 8px;}
-  .cap-text{font-size:13.5px;color:var(--text3);line-height:1.7;white-space:pre-line;}
-  .tags{margin-top:14px;display:flex;flex-wrap:wrap;gap:5px;}
-  .tag{background:var(--bg3);color:var(--text3);font-size:11.5px;font-weight:600;padding:4px 10px;border-radius:6px;border:1px solid var(--border);transition:all .15s;}
-  .tag:hover{background:var(--border);color:var(--text);transform:translateY(-1px);}
-
-  /* DOWNLOAD */
-  div[data-testid="stDownloadButton"] button{border-radius:9px!important;font-weight:600!important;border:1px solid var(--border)!important;color:var(--text2)!important;background:var(--bg2)!important;padding:9px 18px!important;font-size:13px!important;width:100%;transition:all .15s;letter-spacing:-.01em!important;}
-  div[data-testid="stDownloadButton"] button:hover{background:var(--bg3)!important;border-color:var(--border2)!important;color:var(--text)!important;transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.06);}
-
-  /* EXPANDER */
-  div[data-testid="stExpander"]{border:1px solid var(--border)!important;border-radius:14px!important;background:var(--bg2)!important;position:relative;z-index:2;}
-
-  /* CTA */
-  .cta-dark{margin:100px auto 0;max-width:1100px;background:var(--text);border-radius:24px;padding:clamp(48px,7vw,84px);text-align:center;position:relative;overflow:hidden;z-index:2;}
-  .cta-dark::before,.cta-dark::after{display:none;}
-  .cta-dark h2{font-family:'Sora',sans-serif!important;color:#fff;font-size:clamp(1.9rem,5vw,3.2rem);font-weight:800;letter-spacing:-.04em;margin:0 0 14px;position:relative;z-index:1;line-height:1.1;}
-  .cta-dark p{color:rgba(255,255,255,.5);font-size:16px;max-width:500px;margin:0 auto;line-height:1.75;position:relative;z-index:1;font-weight:400;}
-
-  /* FOOTER */
-  .footer{margin-top:80px;border-top:1px solid var(--border);padding:36px 0 18px;position:relative;z-index:2;}
-  .footer-inner{max-width:1100px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;}
-  .footer .logo{font-size:16px;}
-  .footer p{color:var(--text4);font-size:13px;margin:0;}
-  .footer p b{color:var(--text3);font-weight:600;}
-
-  /* ANIMATIONS */
-  @keyframes fadeUp{from{opacity:0;transform:translateY(20px);}to{opacity:1;transform:none;}}
-  .anim{animation:fadeUp .7s cubic-bezier(.22,1,.36,1) both;}
-  .d1{animation-delay:.08s;}.d2{animation-delay:.16s;}.d3{animation-delay:.24s;}.d4{animation-delay:.32s;}
-
-  /* STREAMLIT */
-  div[data-testid="stAudio"]{border-radius:10px;overflow:hidden;border:1px solid var(--border);}
-  div[data-testid="stMarkdownContainer"]{color:var(--text2)!important;}
-  div[data-testid="stMarkdownContainer"] strong{color:var(--text)!important;}
-  div[data-testid="stMarkdownContainer"] em{color:var(--text3)!important;}
-  .stAlert{border-radius:10px!important;border:1px solid var(--border)!important;background:var(--bg2)!important;}
-
-  /* RESPONSIVE */
-  @media(max-width:900px){
-    .nav{margin:0 -16px;padding:0 16px;}
-    .nav-links{display:none;}
-    .pitch-grid,.how-grid,.bundle-grid{grid-template-columns:1fr;}
-    .how-grid{gap:0;}
-    .post-wrap{grid-template-columns:1fr;}
-    .stat{padding:18px 20px;}
-    .ticker{margin:56px -16px 0;}
-    .stats{border-radius:14px;}
-  }
-</style>
-<div class="bg-canvas"></div>
-<div class="grid-overlay"></div>
-<div class="orb orb-1"></div>
-<div class="orb orb-2"></div>
-<div class="orb orb-3"></div>
-<div class="noise"></div>
-""")
-
-# ================= NAV =================
-st.html("""
-<nav class="nav"><div class="nav-inner">
-  <div class="logo">
-    <div class="logo-icon">⚡</div>
-    <div class="logo-text">Hype<span>Repo</span></div>
-  </div>
-  <div class="nav-links">
-    <a href="#how">How it works</a>
-    <a href="#bundle">What you get</a>
-    <span class="nav-badge">AI-Powered</span>
-  </div>
-  <a class="nav-cta" href="#top">Generate Kit ✦</a>
-</div></nav>
-""")
-
-# ================= HERO =================
-st.html("""
-<div class="hero" id="top">
-  <div class="badge anim"><span class="pulse-dot"></span>AI Marketing Agent &nbsp;·&nbsp; Zero setup</div>
-  <h1 class="anim d1">Turn any repo into<br><span class="serif-accent">a full launch kit.</span></h1>
-  <p class="sub anim d2">Paste a GitHub URL and walk away with pitch cards, social posts with AI visuals, voiceovers, and a 2-minute demo pitch — generated from your actual code, not a template.</p>
-</div>
-""")
-
+st.markdown(_CSS, unsafe_allow_html=True)
+st.markdown(_NAV, unsafe_allow_html=True)
+st.markdown(_HERO, unsafe_allow_html=True)
 if not DO_API_KEY or not ALIBABA_API_KEY:
     st.error("🔑 Missing API keys — add `DO_API_KEY` and `ALIBABA_API_KEY` in the app's Secrets settings.")
     st.stop()
@@ -564,29 +348,16 @@ if _btn:
     repo_name = html.escape(m.group(2)) if m else "project"
 
     brief = final.get("concept_brief", {})
-    with st.expander("🔍 What the AI understood about this repo"):
-        st.markdown(f"**{brief.get('one_liner', '')}**")
-        st.write(brief.get("concept", ""))
-        feats = brief.get("key_features", [])
-        if feats:
-            st.markdown("**Key features spotted in the code:**")
-            for f in feats:
-                st.markdown(f"- {f}")
-
-    demo = final.get("demo_pitch", {})
-    st.markdown('<div class="sec-title anim">🎤 The 2-Minute Demo Pitch</div>'
-                '<div class="sec-sub anim d1">Voiceover-ready script with studio-quality AI audio.</div>', unsafe_allow_html=True)
-    paras = "".join(f"<p class='script'>{html.escape(p.strip())}</p>"
-                    for p in demo.get("script", "").split("\n\n") if p.strip())
-    st.markdown(f"""<div class="demo-card anim d1"><div class="demo-kicker">★ FEATURED</div>
-        <h2>{html.escape(demo.get('title', 'Demo Pitch'))}</h2>{paras}</div>""", unsafe_allow_html=True)
-    if demo.get("audio_path") and os.path.exists(demo["audio_path"]):
-        with open(demo["audio_path"], "rb") as f:
-            demo_bytes = f.read()
-        st.audio(demo_bytes, format="audio/mpeg")
-        st.download_button("⬇️ Download demo pitch audio", demo_bytes, file_name="demo_pitch.mp3")
-    elif demo.get("audio_error"):
-        st.warning(f"🎙️ Demo voiceover failed: {demo['audio_error'][:250]}")
+    st.markdown('<div class="sec-title anim">⚖️ The Honest Review</div>'
+                '<div class="sec-sub anim d1">Grounded in your actual code — what to brag about, and what to fix before launch.</div>',
+                unsafe_allow_html=True)
+    def _sw(items):
+        items = [str(s) for s in (items or []) if str(s).strip()]
+        return "".join(f"<li>{html.escape(s)}</li>" for s in items) or "<li>—</li>"
+    st.markdown(f"""<div class="sw-grid anim d1">
+      <div class="sw-card strengths"><h3>💪 Strengths</h3><ul>{_sw(brief.get("strengths"))}</ul></div>
+      <div class="sw-card weaknesses"><h3>🧐 Weaknesses</h3><ul>{_sw(brief.get("weaknesses"))}</ul></div>
+    </div>""", unsafe_allow_html=True)
 
     st.markdown('<div class="sec-title anim">✨ Pitch Cards</div>'
                 '<div class="sec-sub anim d1">The three strongest angles — ready for your README or landing page.</div>',
@@ -645,8 +416,6 @@ if _btn:
         _img_ok = bool(_p.get("img_path") and os.path.exists(_p["img_path"]))
         _aud_ok = bool(_p.get("audio_path") and os.path.exists(_p["audio_path"]))
         _rep.append(f"{'✅' if _img_ok else '❌'} Post {_i} image · {'✅' if _aud_ok else '❌'} Post {_i} voiceover")
-    _d_ok = bool(demo.get("audio_path") and os.path.exists(demo["audio_path"]))
-    _rep.append(f"{'✅' if _d_ok else '❌'} Demo pitch voiceover")
     st.markdown("<div class='sec-title anim'>🧾 Generation report</div>"
                 "<div class='sec-sub anim d1'>What actually got built — no silent failures.</div>",
                 unsafe_allow_html=True)
@@ -654,65 +423,16 @@ if _btn:
         st.markdown(f"- {_line}")
 
 # ================= STATS =================
-st.html("""
-<div class="stats anim">
-  <div class="stat"><b>3</b><span>AI visuals</span></div>
-  <div class="stat"><b>4</b><span>Voiceovers</span></div>
-  <div class="stat"><b>3</b><span>Pitch cards</span></div>
-  <div class="stat"><b>1</b><span>Demo pitch</span></div>
-</div>
-""")
+st.markdown(_STATS, unsafe_allow_html=True)
 
 # ================= TICKER =================
-st.html("""
-<div class="ticker"><div class="ticker-track">
-  <span class="tick"><em>✦</em>PITCH CARDS</span><span class="tick"><em>✦</em>AI VOICEOVERS</span><span class="tick"><em>✦</em>SCROLL-STOPPING VISUALS</span><span class="tick"><em>✦</em>2-MINUTE DEMO PITCH</span><span class="tick"><em>✦</em>CAPTIONS & HASHTAGS</span><span class="tick"><em>✦</em>ZERO EDITING NEEDED</span>
-  <span class="tick"><em>✦</em>PITCH CARDS</span><span class="tick"><em>✦</em>AI VOICEOVERS</span><span class="tick"><em>✦</em>SCROLL-STOPPING VISUALS</span><span class="tick"><em>✦</em>2-MINUTE DEMO PITCH</span><span class="tick"><em>✦</em>CAPTIONS & HASHTAGS</span><span class="tick"><em>✦</em>ZERO EDITING NEEDED</span>
-</div></div>
-""")
+st.markdown(_TICKER, unsafe_allow_html=True)
 
 # ================= HOW IT WORKS =================
-st.html("""
-<div class="section" id="how">
-  <div class="kicker">HOW IT WORKS</div>
-  <div class="sec-h">Repo link to launch kit<br>in under five minutes.</div>
-  <p class="sec-p">No prompts. No templates. A five-stage AI pipeline reads your code, understands what you built, then writes, designs, and records everything.</p>
-  <div class="how-grid">
-    <div class="how-card anim"><div class="how-num">01</div><h3>🔗 Paste your repo URL</h3><p>Drop any public GitHub URL. The agent fetches your README, repo metadata, and actual source files — not just the docs.</p></div>
-    <div class="how-card anim d1"><div class="how-num">02</div><h3>🧠 Deep code analysis</h3><p>A senior-engineer-grade LLM builds a concept brief: what you built, how it works, who it's for, and what makes it genuinely different.</p></div>
-    <div class="how-card anim d2"><div class="how-num">03</div><h3>🚀 Ship the full kit</h3><p>Pitch cards, social posts with AI visuals and voiceovers, plus a structured 2-minute demo pitch with studio audio. One click to download all.</p></div>
-  </div>
-</div>
-""")
+st.markdown(_HOW, unsafe_allow_html=True)
 
-# ================= BUNDLE =================
-st.html("""
-<div class="section" id="bundle">
-  <div class="kicker">WHAT YOU GET</div>
-  <div class="sec-h">Everything a launch needs.<br>Nothing it doesn't.</div>
-  <p class="sec-p">Every asset is grounded in your actual code — never generic filler. Built from a real concept brief, not a template.</p>
-  <div class="bundle-grid">
-    <div class="bundle-card anim"><div class="bundle-icon">✨</div><h3>Pitch Cards</h3><p>Three razor-sharp angles with concrete proof points — ready for your README or landing page hero.</p></div>
-    <div class="bundle-card anim d1"><div class="bundle-icon">📱</div><h3>Social Posts</h3><p>Problem → magic moment → proof. Scroll-stopping hooks, captions, and hashtags — three distinct angles.</p></div>
-    <div class="bundle-card anim d2"><div class="bundle-icon">🎨</div><h3>AI Visuals</h3><p>Custom 1:1 promo graphics per post, generated from prompts based on your project's real subject matter.</p></div>
-    <div class="bundle-card anim d3"><div class="bundle-icon">🎙️</div><h3>Voiceovers</h3><p>Natural-sounding AI narration for every post and the full demo pitch — no microphone, no studio needed.</p></div>
-    <div class="bundle-card anim d4"><div class="bundle-icon">🎤</div><h3>2-Min Demo Pitch</h3><p>Cold open → problem → walkthrough → features → CTA. Structured like a real demo day, with full audio.</p></div>
-    <div class="bundle-card anim"><div class="bundle-icon">⬇️</div><h3>Instant Download Kit</h3><p>Every image and MP3 is one click away. Take the whole bundle straight to your content scheduler.</p></div>
-  </div>
-</div>
-""")
+# ================= WHAT YOU GET =================
+st.markdown(_BUNDLE, unsafe_allow_html=True)
 
-# ================= DARK CTA + FOOTER =================
-st.html("""
-<div class="cta-dark">
-  <h2>Your repo deserves more<br>than <span class="serif-accent">a README.</span></h2>
-  <p>Paste a link above and walk away with a complete launch kit — copy, visuals, voiceovers, and a demo pitch. Powered by real code analysis.</p>
-</div>
-<div class="footer"><div class="footer-inner">
-  <div class="logo">
-    <div class="logo-icon">⚡</div>
-    <div class="logo-text">Hype<span>Repo</span></div>
-  </div>
-  <p>Built with <b>HypeRepo</b> — paste a repo, ship the hype. © 2026</p>
-</div></div>
-""")
+# ================= CTA + FOOTER =================
+st.markdown(_CTA, unsafe_allow_html=True)
