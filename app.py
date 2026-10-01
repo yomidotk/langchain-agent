@@ -186,10 +186,7 @@ st.html("""
   }
 
   /* ─── BUTTON ─── */
-  div[data-testid="stButton"] {
-    display: flex !important; justify-content: center !important;
-    margin-top: 22px; position: relative; z-index: 2;
-  }
+  div[data-testid="stButton"] { margin-top: 0; position: relative; z-index: 2; }
   div[data-testid="stButton"] button {
     background: linear-gradient(135deg, var(--amber) 0%, var(--walnut) 60%, var(--espresso) 100%) !important;
     color: #fff !important; border: none !important; border-radius: 999px !important;
@@ -620,7 +617,11 @@ st.html('<div class="anim d3">', )
 repo_url = st.text_input("repo", placeholder="https://github.com/owner/repo  —  paste any public repo URL")
 st.html('</div>')
 
-if st.button("✨ Generate marketing bundle"):
+_l, _c, _r = st.columns([1.2, 2, 1.2])
+with _c:
+    _btn = st.button("✨ Generate marketing bundle", use_container_width=True)
+
+if _btn:
     if not repo_url.strip() or "github.com" not in repo_url:
         st.error("Please paste a valid GitHub repo URL.")
         st.stop()
