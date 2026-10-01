@@ -24,6 +24,255 @@ ALIBABA_API_KEY = get_secret("ALIBABA_API_KEY")
 DO_URL = "https://inference.do-ai.run/v1/responses"
 DO_MODEL = "openai-gpt-oss-20b"
 
+# ================= BACKEND PIPELINE (the brain) =================
+def tts_to_mp3(text, out_path, voice="en-US-RogerNeural"):
+    def _run():
+        async def _main():
+            rate = "+0%" if len(text) > 500 else "+5%"
+            await edge_tts.Communicate(text, voice=voice, rate=rate).save(out_path)
+        asyncio.run(_main())
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    th.join()
+
+def do_call(prompt, max_tokens, temperature, _retry=True):
+    response = requests.post(DO_URL,
+        headers={"Authorization": f"Bearer {DO_API_KEY}", "Content-Type": "application/json"},
+        json={"model": DO_MODEL, "input": prompt, "max_output_tokens": max_tokens,
+              "temperature": temperature, "stream": False}, timeout=180)
+    response.raise_for_status()
+    res_data = response.json()
+    raw_content = ""
+    if "choices" in res_data and len(res_data["choices"]) > 0:
+        raw_content = res_data["choices"][0].get("message", {}).get("content", "")
+    else:
+        raw_content = res_data.get("output", "") or res_data.get("text", "")
+    if isinstance(raw_content, list):
+        for block in raw_content:
+            if isinstance(block, dict) and block.get("role") == "assistant":
+                sub = block.get("content", [])
+                if isinstance(sub, list) and len(sub) > 0:
+                    raw_content = sub[0].get("text", "")
+    if not isinstance(raw_content, str):
+        raw_content = json.dumps(raw_content)
+    clean_text = re.sub(r'```(?:json)?', '', raw_content).strip()
+    match = re.search(r'\{.*\}', clean_text, re.DOTALL)
+    final_json = match.group(0) if match else clean_text
+    try:
+        return json.loads(final_json)
+    except json.JSONDecodeError as e:
+        if not _retry:
+            raise e
+        return do_call("Your previous response was not valid JSON (cut off or malformed). "
+                       "Return the COMPLETE object again as valid JSON only, every field, full text, "
+                       "no truncation, no markdown fences.\n\nBroken output:\n" + final_json[:6000],
+                       max_tokens, temperature, _retry=False)
+
+class AgentState(TypedDict):
+    repo_url: str; out_dir: str; readme_text: str; repo_context: str; code_context: str
+    concept_brief: Dict; pitch_cards: List[Dict]; social_posts: List[Dict]; demo_pitch: Dict
+
+CODE_EXTS = (".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".rb", ".php", ".swift", ".kt")
+SKIP_DIRS = {"node_modules", ".git", "dist", "build", "__pycache__", ".next", "vendor", ".idea", ".vscode"}
+
+def _raw(owner, repo, branch, path):
+    try:
+        r = requests.get(f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}", timeout=15)
+        if r.status_code == 200 and r.text.strip():
+            return r.text
+    except Exception:
+        pass
+    return ""
+
+def fetch_repo(state: AgentState):
+    m = re.search(r"https?://github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+)", state["repo_url"])
+    if not m:
+        raise ValueError("Could not parse GitHub repo URL")
+    owner, repo = m.group(1), m.group(2)
+    r = requests.get(f"https://raw.githubusercontent.com/{owner}/{repo}/main/README.md", timeout=30)
+    if r.status_code != 200:
+        r = requests.get(f"https://raw.githubusercontent.com/{owner}/{repo}/master/README.md", timeout=30)
+    readme = r.text[:4000] if r.status_code == 200 else ""
+    meta, tree, manifest = "", "", ""
+    code_chunks = []
+    def grab(path):
+        for br in ("main", "master"):
+            t = _raw(owner, repo, br, path)
+            if t:
+                code_chunks.append(f"--- {path} ---\n{t[:2000]}")
+                return True
+        return False
+    try:
+        meta_r = requests.get(f"https://api.github.com/repos/{owner}/{repo}", timeout=20).json()
+        meta = (f"{meta_r.get('description', '')} | stars: {meta_r.get('stargazers_count', '?')} "
+                f"| lang: {meta_r.get('language', '?')} | topics: {', '.join(meta_r.get('topics', [])[:8])}")
+    except Exception:
+        pass
+    try:
+        top = requests.get(f"https://api.github.com/repos/{owner}/{repo}/contents/", timeout=20).json()
+        items = top if isinstance(top, list) else []
+        tree = ", ".join(x.get("name", "") for x in items[:30])
+        cands = [x["name"] for x in items if x.get("type") == "file" and x["name"].lower().endswith(CODE_EXTS)]
+        cands.sort(key=lambda n: 0 if any(k in n.lower() for k in ["main", "index", "app", "cli", "server"]) else 1)
+        for name in cands[:4]:
+            grab(name)
+        subdirs = [x["name"] for x in items if x.get("type") == "dir" and x["name"] not in SKIP_DIRS]
+        for sd in ["src", "lib", "app", "pkg", "components"]:
+            if sd in subdirs:
+                try:
+                    sub = requests.get(f"https://api.github.com/repos/{owner}/{repo}/contents/{sd}", timeout=20).json()
+                    if isinstance(sub, list):
+                        sfiles = [x["name"] for x in sub
+                                  if x.get("type") == "file" and x["name"].lower().endswith(CODE_EXTS)][:3]
+                        for name in sfiles:
+                            if len(code_chunks) >= 7:
+                                break
+                            grab(f"{sd}/{name}")
+                except Exception:
+                    pass
+                break
+    except Exception:
+        pass
+    for mf in ["package.json", "pyproject.toml", "setup.py", "Cargo.toml", "go.mod"]:
+        t = _raw(owner, repo, "main", mf) or _raw(owner, repo, "master", mf)
+        if t and len(t) > 50:
+            manifest = f"[{mf}]\n{t[:1200]}"
+            break
+    return {"readme_text": readme,
+            "repo_context": f"META: {meta}\nFILES: {tree}\n{manifest}",
+            "code_context": "\n\n".join(code_chunks)}
+
+def understand_project(state: AgentState):
+    prompt = f"""You are a senior staff engineer doing technical due diligence on an open-source project.
+Read the README, repo metadata, and source code excerpts below and explain the project like you truly understand it.
+
+REPO: {state['repo_url']}
+{state['repo_context']}
+
+README:
+{state['readme_text']}
+
+SOURCE CODE EXCERPTS:
+{state['code_context']}
+
+Output ONLY a valid JSON object matching this exact schema:
+{{"one_liner": "what it is, in one punchy sentence",
+"concept": "2-3 sentences: the core idea, explained simply",
+"how_it_works": "3-5 sentences, technically concrete: what the user actually does step by step, and what the code does under the hood",
+"key_features": ["concrete feature with a specific detail", "up to 6 total, most impressive first"],
+"audience": "who this is for, specifically",
+"differentiator": "what makes it different from alternatives — or 'not clear from context' if honestly unknown",
+"vibe": "the project's personality/aesthetic in ~5 words"}}
+RULES: Only state what the context supports. Be concrete: name real commands, file types, behaviors from the code — never generic filler."""
+    return {"concept_brief": do_call(prompt, max_tokens=1500, temperature=0.2)}
+
+def draft_strategy(state: AgentState):
+    brief_text = json.dumps(state["concept_brief"], indent=1)
+    posts_prompt = f"""You are a senior product marketer who writes scroll-stopping launch content for developer tools.
+You already understand the project deeply. Concept brief:
+{brief_text}
+RULES:
+- Every claim must come from the brief. NEVER invent features, stats, integrations, or testimonials.
+- Concrete nouns only. BANNED: revolutionary, game-changing, cutting-edge, unlock, supercharge, seamless.
+- HOOKS name a painful problem or open a curiosity loop. Max 8 words.
+- Short SCRIPTS are SPOKEN WORD: contractions, short sentences, 25-35 words, end with a call to action.
+- IMAGE PROMPTS are self-contained prompts for a square 1:1 social promo graphic depicting THIS project's actual subject matter (never generic laptops/robots/tech wallpaper). MUST include the exact on-image headline in "quotes" (max 5 words), describe scene, composition, style, lighting, colors, and end with: "No watermark, no extra text, no garbled letters."
+Output ONLY a valid JSON object matching this exact schema:
+{{"pitch_cards": [{{"headline": "punchy benefit, max 6 words", "sub": "one concrete sentence with a real feature or proof point"}}, {{"headline": "...", "sub": "..."}}, {{"headline": "...", "sub": "..."}}],
+"social_posts": [{{"hook": "scroll-stopper, max 8 words", "script": "25-35 word spoken script: hook, one concrete capability, call to action", "image_prompt": "full image generation prompt per the rules above", "caption": "post caption: hook line, 2-3 value lines, call to action", "hashtags": ["#tag1", "#tag2", "#tag3"]}}, {{"hook": "...", "script": "...", "image_prompt": "...", "caption": "...", "hashtags": ["#tag1", "#tag2", "#tag3"]}}, {{"hook": "...", "script": "...", "image_prompt": "...", "caption": "...", "hashtags": ["#tag1", "#tag2", "#tag3"]}}]}}
+The 3 posts cover 3 angles IN ORDER: 1) the painful problem, 2) the magic moment of using it, 3) proof + call to action (star the repo)."""
+    package = do_call(posts_prompt, max_tokens=3000, temperature=0.3)
+    cards = package.get("pitch_cards", [])
+    norm_cards = [c if isinstance(c, dict) else {"headline": str(c), "sub": ""} for c in cards]
+    demo_prompt = f"""You are a demo-day pitch coach writing a spoken product demo.
+You already understand the project deeply. Concept brief:
+{brief_text}
+Write a FULL 2-minute spoken demo pitch: 260-300 words, paragraphs separated by blank lines.
+Structure IN ORDER:
+1) Cold-open hook — a surprising or painful truth (15s)
+2) The problem this project kills (25s)
+3) Narrated walkthrough — describe using it as if showing the screen, naming real UI elements and behaviors from the brief (50s)
+4) The 2-3 strongest features with concrete details from the brief (30s)
+5) Who it's for + call to action: star the repo, link below (15s)
+RULES: spoken word only — contractions, short sentences, concrete nouns. NO bullet points, NO stage directions, no invented features. BANNED: revolutionary, game-changing, cutting-edge, unlock, supercharge, seamless.
+Output ONLY a valid JSON object matching this exact schema:
+{{"demo_pitch": {{"title": "title of the 2-minute demo", "script": "..."}}}}"""
+    demo_data = do_call(demo_prompt, max_tokens=2000, temperature=0.3)
+    return {"pitch_cards": norm_cards, "social_posts": package.get("social_posts", []),
+            "demo_pitch": demo_data.get("demo_pitch", {})}
+
+def generate_assets(state: AgentState):
+    out_dir = state["out_dir"]
+    posts = state["social_posts"]
+    for i, post in enumerate(posts):
+        audio_path = os.path.join(out_dir, f"post_{i}.mp3")
+        tts_to_mp3(post.get("script", ""), audio_path)
+        post["audio_path"] = audio_path
+        try:
+            img_rsp = requests.post(
+                "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+                headers={"Authorization": f"Bearer {ALIBABA_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "qwen-image-max",
+                      "input": {"messages": [{"role": "user", "content": [{"text": post["image_prompt"]}]}]},
+                      "parameters": {"size": "1328*1328", "n": 1, "prompt_extend": True, "watermark": False}},
+                timeout=180)
+            img_data = img_rsp.json()
+            if img_rsp.status_code != 200:
+                raise RuntimeError(f"Alibaba error {img_rsp.status_code}: {img_data.get('message', img_rsp.text)}")
+            img_url = None
+            for block in img_data["output"]["choices"][0]["message"]["content"]:
+                if isinstance(block, dict) and "image" in block:
+                    img_url = block["image"]
+                    break
+            if not img_url:
+                raise RuntimeError(f"No image in response: {img_data}")
+            img_res = requests.get(img_url, timeout=60)
+            img_res.raise_for_status()
+            img_path = os.path.join(out_dir, f"post_{i}.png")
+            with open(img_path, "wb") as f:
+                f.write(img_res.content)
+            post["img_path"] = img_path
+        except Exception as e:
+            post["img_path"] = None
+            post["img_error"] = str(e)
+    demo = state.get("demo_pitch", {})
+    if demo.get("script"):
+        demo_path = os.path.join(out_dir, "demo_pitch.mp3")
+        tts_to_mp3(demo["script"], demo_path)
+        demo["audio_path"] = demo_path
+    return {"social_posts": posts, "demo_pitch": demo}
+
+def build_dashboard(state: AgentState):
+    return {}
+
+workflow = StateGraph(AgentState)
+workflow.add_node("fetch_repo", fetch_repo)
+workflow.add_node("understand_project", understand_project)
+workflow.add_node("draft_strategy", draft_strategy)
+workflow.add_node("generate_assets", generate_assets)
+workflow.add_node("build_dashboard", build_dashboard)
+workflow.set_entry_point("fetch_repo")
+workflow.add_edge("fetch_repo", "understand_project")
+workflow.add_edge("understand_project", "draft_strategy")
+workflow.add_edge("draft_strategy", "generate_assets")
+workflow.add_edge("generate_assets", "build_dashboard")
+workflow.add_edge("build_dashboard", END)
+video_agent = workflow.compile()
+
+STEPS = [("fetch_repo", "📥", "Reading repo"),
+         ("understand_project", "🔬", "Understanding project"),
+         ("draft_strategy", "🧠", "Writing copy"),
+         ("generate_assets", "🎨", "Images + voiceovers"),
+         ("build_dashboard", "📊", "Assembling")]
+
+def render_steps(done, active=None):
+    parts = []
+    for key, icon, label in STEPS:
+        cls = "done" if key in done else ("active" if key == active else "todo")
+        mark = "✓" if key in done else icon
+        parts.append(f'<div class="step {cls}"><div class="dot">{mark}</div>{label}</div>')
+    return '<div class="steps">' + "".join(parts) + "</div>"
+
 # ================= DESIGN SYSTEM =================
 st.html("""
 <style>
@@ -411,255 +660,6 @@ st.html("""
   </div>
 </div>
 """)
-
-# ================= BACKEND (unchanged brain) =================
-def tts_to_mp3(text, out_path, voice="en-US-RogerNeural"):
-    def _run():
-        async def _main():
-            rate = "+0%" if len(text) > 500 else "+5%"
-            await edge_tts.Communicate(text, voice=voice, rate=rate).save(out_path)
-        asyncio.run(_main())
-    th = threading.Thread(target=_run, daemon=True)
-    th.start()
-    th.join()
-
-def do_call(prompt, max_tokens, temperature, _retry=True):
-    response = requests.post(DO_URL,
-        headers={"Authorization": f"Bearer {DO_API_KEY}", "Content-Type": "application/json"},
-        json={"model": DO_MODEL, "input": prompt, "max_output_tokens": max_tokens,
-              "temperature": temperature, "stream": False}, timeout=180)
-    response.raise_for_status()
-    res_data = response.json()
-    raw_content = ""
-    if "choices" in res_data and len(res_data["choices"]) > 0:
-        raw_content = res_data["choices"][0].get("message", {}).get("content", "")
-    else:
-        raw_content = res_data.get("output", "") or res_data.get("text", "")
-    if isinstance(raw_content, list):
-        for block in raw_content:
-            if isinstance(block, dict) and block.get("role") == "assistant":
-                sub = block.get("content", [])
-                if isinstance(sub, list) and len(sub) > 0:
-                    raw_content = sub[0].get("text", "")
-    if not isinstance(raw_content, str):
-        raw_content = json.dumps(raw_content)
-    clean_text = re.sub(r'```(?:json)?', '', raw_content).strip()
-    match = re.search(r'\{.*\}', clean_text, re.DOTALL)
-    final_json = match.group(0) if match else clean_text
-    try:
-        return json.loads(final_json)
-    except json.JSONDecodeError as e:
-        if not _retry:
-            raise e
-        return do_call("Your previous response was not valid JSON (cut off or malformed). "
-                       "Return the COMPLETE object again as valid JSON only, every field, full text, "
-                       "no truncation, no markdown fences.\n\nBroken output:\n" + final_json[:6000],
-                       max_tokens, temperature, _retry=False)
-
-class AgentState(TypedDict):
-    repo_url: str; out_dir: str; readme_text: str; repo_context: str; code_context: str
-    concept_brief: Dict; pitch_cards: List[Dict]; social_posts: List[Dict]; demo_pitch: Dict
-
-CODE_EXTS = (".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".rb", ".php", ".swift", ".kt")
-SKIP_DIRS = {"node_modules", ".git", "dist", "build", "__pycache__", ".next", "vendor", ".idea", ".vscode"}
-
-def _raw(owner, repo, branch, path):
-    try:
-        r = requests.get(f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}", timeout=15)
-        if r.status_code == 200 and r.text.strip():
-            return r.text
-    except Exception:
-        pass
-    return ""
-
-def fetch_repo(state: AgentState):
-    m = re.search(r"https?://github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+)", state["repo_url"])
-    if not m:
-        raise ValueError("Could not parse GitHub repo URL")
-    owner, repo = m.group(1), m.group(2)
-    r = requests.get(f"https://raw.githubusercontent.com/{owner}/{repo}/main/README.md", timeout=30)
-    if r.status_code != 200:
-        r = requests.get(f"https://raw.githubusercontent.com/{owner}/{repo}/master/README.md", timeout=30)
-    readme = r.text[:4000] if r.status_code == 200 else ""
-    meta, tree, manifest = "", "", ""
-    code_chunks = []
-    def grab(path):
-        for br in ("main", "master"):
-            t = _raw(owner, repo, br, path)
-            if t:
-                code_chunks.append(f"--- {path} ---\n{t[:2000]}")
-                return True
-        return False
-    try:
-        meta_r = requests.get(f"https://api.github.com/repos/{owner}/{repo}", timeout=20).json()
-        meta = (f"{meta_r.get('description', '')} | stars: {meta_r.get('stargazers_count', '?')} "
-                f"| lang: {meta_r.get('language', '?')} | topics: {', '.join(meta_r.get('topics', [])[:8])}")
-    except Exception:
-        pass
-    try:
-        top = requests.get(f"https://api.github.com/repos/{owner}/{repo}/contents/", timeout=20).json()
-        items = top if isinstance(top, list) else []
-        tree = ", ".join(x.get("name", "") for x in items[:30])
-        cands = [x["name"] for x in items if x.get("type") == "file" and x["name"].lower().endswith(CODE_EXTS)]
-        cands.sort(key=lambda n: 0 if any(k in n.lower() for k in ["main", "index", "app", "cli", "server"]) else 1)
-        for name in cands[:4]:
-            grab(name)
-        subdirs = [x["name"] for x in items if x.get("type") == "dir" and x["name"] not in SKIP_DIRS]
-        for sd in ["src", "lib", "app", "pkg", "components"]:
-            if sd in subdirs:
-                try:
-                    sub = requests.get(f"https://api.github.com/repos/{owner}/{repo}/contents/{sd}", timeout=20).json()
-                    if isinstance(sub, list):
-                        sfiles = [x["name"] for x in sub
-                                  if x.get("type") == "file" and x["name"].lower().endswith(CODE_EXTS)][:3]
-                        for name in sfiles:
-                            if len(code_chunks) >= 7:
-                                break
-                            grab(f"{sd}/{name}")
-                except Exception:
-                    pass
-                break
-    except Exception:
-        pass
-    for mf in ["package.json", "pyproject.toml", "setup.py", "Cargo.toml", "go.mod"]:
-        t = _raw(owner, repo, "main", mf) or _raw(owner, repo, "master", mf)
-        if t and len(t) > 50:
-            manifest = f"[{mf}]\n{t[:1200]}"
-            break
-    return {"readme_text": readme,
-            "repo_context": f"META: {meta}\nFILES: {tree}\n{manifest}",
-            "code_context": "\n\n".join(code_chunks)}
-
-def understand_project(state: AgentState):
-    prompt = f"""You are a senior staff engineer doing technical due diligence on an open-source project.
-Read the README, repo metadata, and source code excerpts below and explain the project like you truly understand it.
-
-REPO: {state['repo_url']}
-{state['repo_context']}
-
-README:
-{state['readme_text']}
-
-SOURCE CODE EXCERPTS:
-{state['code_context']}
-
-Output ONLY a valid JSON object matching this exact schema:
-{{"one_liner": "what it is, in one punchy sentence",
-"concept": "2-3 sentences: the core idea, explained simply",
-"how_it_works": "3-5 sentences, technically concrete: what the user actually does step by step, and what the code does under the hood",
-"key_features": ["concrete feature with a specific detail", "up to 6 total, most impressive first"],
-"audience": "who this is for, specifically",
-"differentiator": "what makes it different from alternatives — or 'not clear from context' if honestly unknown",
-"vibe": "the project's personality/aesthetic in ~5 words"}}
-RULES: Only state what the context supports. Be concrete: name real commands, file types, behaviors from the code — never generic filler."""
-    return {"concept_brief": do_call(prompt, max_tokens=1500, temperature=0.2)}
-
-def draft_strategy(state: AgentState):
-    brief_text = json.dumps(state["concept_brief"], indent=1)
-    posts_prompt = f"""You are a senior product marketer who writes scroll-stopping launch content for developer tools.
-You already understand the project deeply. Concept brief:
-{brief_text}
-RULES:
-- Every claim must come from the brief. NEVER invent features, stats, integrations, or testimonials.
-- Concrete nouns only. BANNED: revolutionary, game-changing, cutting-edge, unlock, supercharge, seamless.
-- HOOKS name a painful problem or open a curiosity loop. Max 8 words.
-- Short SCRIPTS are SPOKEN WORD: contractions, short sentences, 25-35 words, end with a call to action.
-- IMAGE PROMPTS are self-contained prompts for a square 1:1 social promo graphic depicting THIS project's actual subject matter (never generic laptops/robots/tech wallpaper). MUST include the exact on-image headline in "quotes" (max 5 words), describe scene, composition, style, lighting, colors, and end with: "No watermark, no extra text, no garbled letters."
-Output ONLY a valid JSON object matching this exact schema:
-{{"pitch_cards": [{{"headline": "punchy benefit, max 6 words", "sub": "one concrete sentence with a real feature or proof point"}}, {{"headline": "...", "sub": "..."}}, {{"headline": "...", "sub": "..."}}],
-"social_posts": [{{"hook": "scroll-stopper, max 8 words", "script": "25-35 word spoken script: hook, one concrete capability, call to action", "image_prompt": "full image generation prompt per the rules above", "caption": "post caption: hook line, 2-3 value lines, call to action", "hashtags": ["#tag1", "#tag2", "#tag3"]}}, {{"hook": "...", "script": "...", "image_prompt": "...", "caption": "...", "hashtags": ["#tag1", "#tag2", "#tag3"]}}, {{"hook": "...", "script": "...", "image_prompt": "...", "caption": "...", "hashtags": ["#tag1", "#tag2", "#tag3"]}}]}}
-The 3 posts cover 3 angles IN ORDER: 1) the painful problem, 2) the magic moment of using it, 3) proof + call to action (star the repo)."""
-    package = do_call(posts_prompt, max_tokens=3000, temperature=0.3)
-    cards = package.get("pitch_cards", [])
-    norm_cards = [c if isinstance(c, dict) else {"headline": str(c), "sub": ""} for c in cards]
-    demo_prompt = f"""You are a demo-day pitch coach writing a spoken product demo.
-You already understand the project deeply. Concept brief:
-{brief_text}
-Write a FULL 2-minute spoken demo pitch: 260-300 words, paragraphs separated by blank lines.
-Structure IN ORDER:
-1) Cold-open hook — a surprising or painful truth (15s)
-2) The problem this project kills (25s)
-3) Narrated walkthrough — describe using it as if showing the screen, naming real UI elements and behaviors from the brief (50s)
-4) The 2-3 strongest features with concrete details from the brief (30s)
-5) Who it's for + call to action: star the repo, link below (15s)
-RULES: spoken word only — contractions, short sentences, concrete nouns. NO bullet points, NO stage directions, no invented features. BANNED: revolutionary, game-changing, cutting-edge, unlock, supercharge, seamless.
-Output ONLY a valid JSON object matching this exact schema:
-{{"demo_pitch": {{"title": "title of the 2-minute demo", "script": "..."}}}}"""
-    demo_data = do_call(demo_prompt, max_tokens=2000, temperature=0.3)
-    return {"pitch_cards": norm_cards, "social_posts": package.get("social_posts", []),
-            "demo_pitch": demo_data.get("demo_pitch", {})}
-
-def generate_assets(state: AgentState):
-    out_dir = state["out_dir"]
-    posts = state["social_posts"]
-    for i, post in enumerate(posts):
-        audio_path = os.path.join(out_dir, f"post_{i}.mp3")
-        tts_to_mp3(post.get("script", ""), audio_path)
-        post["audio_path"] = audio_path
-        try:
-            img_rsp = requests.post(
-                "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
-                headers={"Authorization": f"Bearer {ALIBABA_API_KEY}", "Content-Type": "application/json"},
-                json={"model": "qwen-image-max",
-                      "input": {"messages": [{"role": "user", "content": [{"text": post["image_prompt"]}]}]},
-                      "parameters": {"size": "1328*1328", "n": 1, "prompt_extend": True, "watermark": False}},
-                timeout=180)
-            img_data = img_rsp.json()
-            if img_rsp.status_code != 200:
-                raise RuntimeError(f"Alibaba error {img_rsp.status_code}: {img_data.get('message', img_rsp.text)}")
-            img_url = None
-            for block in img_data["output"]["choices"][0]["message"]["content"]:
-                if isinstance(block, dict) and "image" in block:
-                    img_url = block["image"]
-                    break
-            if not img_url:
-                raise RuntimeError(f"No image in response: {img_data}")
-            img_res = requests.get(img_url, timeout=60)
-            img_res.raise_for_status()
-            img_path = os.path.join(out_dir, f"post_{i}.png")
-            with open(img_path, "wb") as f:
-                f.write(img_res.content)
-            post["img_path"] = img_path
-        except Exception as e:
-            post["img_path"] = None
-            post["img_error"] = str(e)
-    demo = state.get("demo_pitch", {})
-    if demo.get("script"):
-        demo_path = os.path.join(out_dir, "demo_pitch.mp3")
-        tts_to_mp3(demo["script"], demo_path)
-        demo["audio_path"] = demo_path
-    return {"social_posts": posts, "demo_pitch": demo}
-
-def build_dashboard(state: AgentState):
-    return {}
-
-workflow = StateGraph(AgentState)
-workflow.add_node("fetch_repo", fetch_repo)
-workflow.add_node("understand_project", understand_project)
-workflow.add_node("draft_strategy", draft_strategy)
-workflow.add_node("generate_assets", generate_assets)
-workflow.add_node("build_dashboard", build_dashboard)
-workflow.set_entry_point("fetch_repo")
-workflow.add_edge("fetch_repo", "understand_project")
-workflow.add_edge("understand_project", "draft_strategy")
-workflow.add_edge("draft_strategy", "generate_assets")
-workflow.add_edge("generate_assets", "build_dashboard")
-workflow.add_edge("build_dashboard", END)
-video_agent = workflow.compile()
-
-STEPS = [("fetch_repo", "📥", "Reading repo"),
-         ("understand_project", "🔬", "Understanding project"),
-         ("draft_strategy", "🧠", "Writing copy"),
-         ("generate_assets", "🎨", "Images + voiceovers"),
-         ("build_dashboard", "📊", "Assembling")]
-
-def render_steps(done, active=None):
-    parts = []
-    for key, icon, label in STEPS:
-        cls = "done" if key in done else ("active" if key == active else "todo")
-        mark = "✓" if key in done else icon
-        parts.append(f'<div class="step {cls}"><div class="dot">{mark}</div>{label}</div>')
-    return '<div class="steps">' + "".join(parts) + "</div>"
 
 # ================= DARK CTA + FOOTER =================
 st.html("""
