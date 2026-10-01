@@ -3,7 +3,7 @@ import re
 import json
 import html
 import asyncio
-import threading
+import base64
 import tempfile
 import requests
 import edge_tts
@@ -26,14 +26,20 @@ DO_MODEL = "openai-gpt-oss-20b"
 
 # ================= BACKEND PIPELINE (the brain) =================
 def tts_to_mp3(text, out_path, voice="en-US-RogerNeural"):
-    def _run():
+    """Returns None on success, or an error string on failure. Never raises,
+    so one bad voiceover can't silently kill the whole bundle."""
+    if not (text or "").strip():
+        return "empty script — nothing to narrate"
+    try:
         async def _main():
             rate = "+0%" if len(text) > 500 else "+5%"
             await edge_tts.Communicate(text, voice=voice, rate=rate).save(out_path)
         asyncio.run(_main())
-    th = threading.Thread(target=_run, daemon=True)
-    th.start()
-    th.join()
+        if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+            return "TTS finished but produced no audio file"
+        return None
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
 
 def do_call(prompt, max_tokens, temperature, _retry=True):
     response = requests.post(DO_URL,
@@ -75,6 +81,19 @@ class AgentState(TypedDict):
 CODE_EXTS = (".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".rb", ".php", ".swift", ".kt")
 SKIP_DIRS = {"node_modules", ".git", "dist", "build", "__pycache__", ".next", "vendor", ".idea", ".vscode"}
 
+# Files that look like code but tell us nothing about what the project DOES
+JUNK_PARTS = (".config.", "config.", ".d.ts", ".pyi", ".min.js", ".min.css",
+              "_test.", ".test.", ".spec.", "test_", "__tests__", "mock", "fixture")
+ENTRY_HINTS = ("main", "index", "app", "cli", "server", "__main__")
+
+def _is_junk(name):
+    n = name.lower()
+    return n.startswith("builtins") or any(p in n for p in JUNK_PARTS)
+
+def _rank(name):
+    n = name.lower()
+    return (_is_junk(n), not any(h in n for h in ENTRY_HINTS), n)
+
 def _raw(owner, repo, branch, path):
     try:
         r = requests.get(f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}", timeout=15)
@@ -113,7 +132,7 @@ def fetch_repo(state: AgentState):
         items = top if isinstance(top, list) else []
         tree = ", ".join(x.get("name", "") for x in items[:30])
         cands = [x["name"] for x in items if x.get("type") == "file" and x["name"].lower().endswith(CODE_EXTS)]
-        cands.sort(key=lambda n: 0 if any(k in n.lower() for k in ["main", "index", "app", "cli", "server"]) else 1)
+        cands.sort(key=_rank)
         for name in cands[:4]:
             grab(name)
         subdirs = [x["name"] for x in items if x.get("type") == "dir" and x["name"] not in SKIP_DIRS]
@@ -122,8 +141,10 @@ def fetch_repo(state: AgentState):
                 try:
                     sub = requests.get(f"https://api.github.com/repos/{owner}/{repo}/contents/{sd}", timeout=20).json()
                     if isinstance(sub, list):
-                        sfiles = [x["name"] for x in sub
-                                  if x.get("type") == "file" and x["name"].lower().endswith(CODE_EXTS)][:3]
+                        sfiles = sorted(
+                            (x["name"] for x in sub
+                             if x.get("type") == "file" and x["name"].lower().endswith(CODE_EXTS)),
+                            key=_rank)[:3]
                         for name in sfiles:
                             if len(code_chunks) >= 7:
                                 break
@@ -206,8 +227,13 @@ def generate_assets(state: AgentState):
     posts = state["social_posts"]
     for i, post in enumerate(posts):
         audio_path = os.path.join(out_dir, f"post_{i}.mp3")
-        tts_to_mp3(post.get("script", ""), audio_path)
-        post["audio_path"] = audio_path
+        a_err = tts_to_mp3(post.get("script", ""), audio_path)
+        if a_err:
+            post["audio_path"] = None
+            post["audio_error"] = a_err
+        else:
+            post["audio_path"] = audio_path
+            post["audio_error"] = None
         try:
             img_rsp = requests.post(
                 "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
@@ -226,20 +252,31 @@ def generate_assets(state: AgentState):
                     break
             if not img_url:
                 raise RuntimeError(f"No image in response: {img_data}")
-            img_res = requests.get(img_url, timeout=60)
-            img_res.raise_for_status()
             img_path = os.path.join(out_dir, f"post_{i}.png")
-            with open(img_path, "wb") as f:
-                f.write(img_res.content)
+            if img_url.startswith("data:"):
+                _, b64data = img_url.split(",", 1)
+                with open(img_path, "wb") as f:
+                    f.write(base64.b64decode(b64data))
+            else:
+                img_res = requests.get(img_url, timeout=60)
+                img_res.raise_for_status()
+                with open(img_path, "wb") as f:
+                    f.write(img_res.content)
             post["img_path"] = img_path
+            post["img_error"] = None
         except Exception as e:
             post["img_path"] = None
             post["img_error"] = str(e)
     demo = state.get("demo_pitch", {})
     if demo.get("script"):
         demo_path = os.path.join(out_dir, "demo_pitch.mp3")
-        tts_to_mp3(demo["script"], demo_path)
-        demo["audio_path"] = demo_path
+        d_err = tts_to_mp3(demo["script"], demo_path)
+        if d_err:
+            demo["audio_path"] = None
+            demo["audio_error"] = d_err
+        else:
+            demo["audio_path"] = demo_path
+            demo["audio_error"] = None
     return {"social_posts": posts, "demo_pitch": demo}
 
 def build_dashboard(state: AgentState):
@@ -548,6 +585,8 @@ if _btn:
             demo_bytes = f.read()
         st.audio(demo_bytes, format="audio/mpeg")
         st.download_button("⬇️ Download demo pitch audio", demo_bytes, file_name="demo_pitch.mp3")
+    elif demo.get("audio_error"):
+        st.warning(f"🎙️ Demo voiceover failed: {demo['audio_error'][:250]}")
 
     st.markdown('<div class="sec-title anim">✨ Pitch Cards</div>'
                 '<div class="sec-sub anim d1">The three strongest angles — ready for your README or landing page.</div>',
@@ -567,8 +606,7 @@ if _btn:
         if post.get("img_path") and os.path.exists(post["img_path"]):
             with open(post["img_path"], "rb") as f:
                 img_bytes = f.read()
-            import base64 as _b64
-            img_tag = f'<img class="post-img" src="data:image/png;base64,{_b64.b64encode(img_bytes).decode()}" />'
+            img_tag = f'<img class="post-img" src="data:image/png;base64,{base64.b64encode(img_bytes).decode()}" />'
         else:
             img_tag = ('<div class="post-img" style="display:flex;align-items:center;justify-content:center;'
                        'color:#a1a1aa;font-size:13px;padding:20px;text-align:center;aspect-ratio:1/1;">'
@@ -591,6 +629,8 @@ if _btn:
             with open(post["audio_path"], "rb") as f:
                 a_bytes = f.read()
             st.audio(a_bytes, format="audio/mpeg")
+        elif post.get("audio_error"):
+            st.warning(f"🎙️ Voiceover {i} failed: {post['audio_error'][:250]}")
         c1, c2 = st.columns(2)
         with c1:
             if img_bytes:
@@ -598,6 +638,20 @@ if _btn:
         with c2:
             if a_bytes:
                 st.download_button(f"⬇️ Voiceover {i}", a_bytes, file_name=f"post_{i}.mp3", key=f"dl_aud_{i}")
+
+    # ================= GENERATION REPORT =================
+    _rep = []
+    for _i, _p in enumerate(final.get("social_posts", []), 1):
+        _img_ok = bool(_p.get("img_path") and os.path.exists(_p["img_path"]))
+        _aud_ok = bool(_p.get("audio_path") and os.path.exists(_p["audio_path"]))
+        _rep.append(f"{'✅' if _img_ok else '❌'} Post {_i} image · {'✅' if _aud_ok else '❌'} Post {_i} voiceover")
+    _d_ok = bool(demo.get("audio_path") and os.path.exists(demo["audio_path"]))
+    _rep.append(f"{'✅' if _d_ok else '❌'} Demo pitch voiceover")
+    st.markdown("<div class='sec-title anim'>🧾 Generation report</div>"
+                "<div class='sec-sub anim d1'>What actually got built — no silent failures.</div>",
+                unsafe_allow_html=True)
+    for _line in _rep:
+        st.markdown(f"- {_line}")
 
 # ================= STATS =================
 st.html("""
