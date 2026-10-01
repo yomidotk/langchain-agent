@@ -2,6 +2,7 @@ import os
 import re
 import json
 import html
+import time
 import asyncio
 import base64
 import tempfile
@@ -68,38 +69,53 @@ def tts_to_mp3(text, out_path, voice=VOICE):
         err = _synth(text, out_path, VOICE_FALLBACK)
     return err
 
-def do_call(prompt, max_tokens, temperature, _retry=True):
-    response = requests.post(DO_URL,
-        headers={"Authorization": f"Bearer {DO_API_KEY}", "Content-Type": "application/json"},
-        json={"model": DO_MODEL, "input": prompt, "max_output_tokens": max_tokens,
-              "temperature": temperature, "stream": False}, timeout=180)
-    response.raise_for_status()
-    res_data = response.json()
-    raw_content = ""
-    if "choices" in res_data and len(res_data["choices"]) > 0:
-        raw_content = res_data["choices"][0].get("message", {}).get("content", "")
-    else:
-        raw_content = res_data.get("output", "") or res_data.get("text", "")
-    if isinstance(raw_content, list):
-        for block in raw_content:
-            if isinstance(block, dict) and block.get("role") == "assistant":
-                sub = block.get("content", [])
-                if isinstance(sub, list) and len(sub) > 0:
-                    raw_content = sub[0].get("text", "")
-    if not isinstance(raw_content, str):
-        raw_content = json.dumps(raw_content)
-    clean_text = re.sub(r'```(?:json)?', '', raw_content).strip()
-    match = re.search(r'\{.*\}', clean_text, re.DOTALL)
-    final_json = match.group(0) if match else clean_text
-    try:
-        return json.loads(final_json)
-    except json.JSONDecodeError as e:
-        if not _retry:
-            raise e
-        return do_call("Your previous response was not valid JSON (cut off or malformed). "
-                       "Return the COMPLETE object again as valid JSON only, every field, full text, "
-                       "no truncation, no markdown fences.\n\nBroken output:\n" + final_json[:6000],
-                       max_tokens, temperature, _retry=False)
+def do_call(prompt, max_tokens, temperature, _tries=3):
+    """Call the LLM and return parsed JSON. Retries up to _tries times with
+    escalating token limits (the old single retry reused the same limit, so a
+    truncated response failed twice identically). Raises RuntimeError with a
+    clear message if the model keeps returning garbage — the caller decides
+    how to surface it instead of crashing with a bare JSONDecodeError."""
+    original = prompt
+    last_err = None
+    for attempt in range(_tries):
+        tok = int(max_tokens * (1.6 ** attempt))
+        if attempt > 0:
+            time.sleep(2 * attempt)  # brief breather for transient flops
+        response = requests.post(DO_URL,
+            headers={"Authorization": f"Bearer {DO_API_KEY}", "Content-Type": "application/json"},
+            json={"model": DO_MODEL, "input": prompt, "max_output_tokens": tok,
+                  "temperature": temperature, "stream": False}, timeout=180)
+        response.raise_for_status()
+        res_data = response.json()
+        raw_content = ""
+        if "choices" in res_data and len(res_data["choices"]) > 0:
+            raw_content = res_data["choices"][0].get("message", {}).get("content", "")
+        else:
+            raw_content = res_data.get("output", "") or res_data.get("text", "")
+        if isinstance(raw_content, list):
+            for block in raw_content:
+                if isinstance(block, dict) and block.get("role") == "assistant":
+                    sub = block.get("content", [])
+                    if isinstance(sub, list) and len(sub) > 0:
+                        raw_content = sub[0].get("text", "")
+        if not isinstance(raw_content, str):
+            raw_content = json.dumps(raw_content)
+        clean_text = re.sub(r'```(?:json)?', '', raw_content).strip()
+        match = re.search(r'\{.*\}', clean_text, re.DOTALL)
+        final_json = match.group(0) if match else clean_text
+        try:
+            if not final_json.strip():
+                raise ValueError(f"empty model output (response keys: {list(res_data.keys())[:6]})")
+            return json.loads(final_json)
+        except (json.JSONDecodeError, ValueError) as e:
+            last_err = e
+            if final_json.strip():
+                prompt = ("Your previous response was not valid JSON (cut off or malformed). "
+                          "Return the COMPLETE object again as valid JSON only, every field, full text, "
+                          "no truncation, no markdown fences.\n\nBroken output:\n" + final_json[:6000])
+            else:
+                prompt = original + "\n\nRespond with valid JSON only, no other text."
+    raise RuntimeError(f"AI returned invalid JSON after {_tries} tries ({last_err})")
 
 class AgentState(TypedDict):
     repo_url: str; out_dir: str; readme_text: str; repo_context: str; code_context: str
@@ -227,7 +243,7 @@ RULES: Only state what the context supports. Be concrete: name real commands, fi
         brief["strengths"] = [str(s) for s in review.get("strengths", [])][:4]
         brief["weaknesses"] = [str(s) for s in review.get("weaknesses", [])][:4]
     except Exception:
-        pass
+        brief["_review_failed"] = True
     return {"concept_brief": brief}
 
 def draft_strategy(state: AgentState):
@@ -246,7 +262,7 @@ Output ONLY a valid JSON object matching this exact schema:
 {{"pitch_cards": [{{"headline": "punchy benefit, max 6 words", "sub": "one concrete sentence with a real feature or proof point"}}, {{"headline": "...", "sub": "..."}}, {{"headline": "...", "sub": "..."}}],
 "social_posts": [{{"hook": "scroll-stopper, max 8 words", "script": "25-35 word spoken script: hook, one concrete capability, call to action", "image_prompt": "full image generation prompt per the rules above", "caption": "post caption: hook line, 2-3 value lines, call to action", "hashtags": ["#tag1", "#tag2", "#tag3"]}}, {{"hook": "...", "script": "...", "image_prompt": "...", "caption": "...", "hashtags": ["#tag1", "#tag2", "#tag3"]}}, {{"hook": "...", "script": "...", "image_prompt": "...", "caption": "...", "hashtags": ["#tag1", "#tag2", "#tag3"]}}]}}
 The 3 posts cover 3 angles IN ORDER: 1) the painful problem, 2) the magic moment of using it, 3) proof + call to action (star the repo)."""
-    package = do_call(posts_prompt, max_tokens=3000, temperature=0.3)
+    package = do_call(posts_prompt, max_tokens=4000, temperature=0.3)
     cards = package.get("pitch_cards", [])
     norm_cards = [c if isinstance(c, dict) else {"headline": str(c), "sub": ""} for c in cards]
     return {"pitch_cards": norm_cards, "social_posts": package.get("social_posts", [])}
@@ -358,14 +374,23 @@ if _btn:
     final, done = {}, []
     steps_ph = st.empty()
     steps_ph.markdown(render_steps(done, active="fetch_repo"), unsafe_allow_html=True)
-    for chunk in video_agent.stream({"repo_url": repo_url.strip(), "out_dir": out_dir}):
-        for node, update in chunk.items():
-            if update:
-                final.update(update)
-            done.append(node)
-            nxt = next((k for k, _, _ in STEPS if k not in done), None)
-            steps_ph.markdown(render_steps(done, active=nxt), unsafe_allow_html=True)
+    failed = None
+    try:
+        for chunk in video_agent.stream({"repo_url": repo_url.strip(), "out_dir": out_dir}):
+            for node, update in chunk.items():
+                if update:
+                    final.update(update)
+                done.append(node)
+                nxt = next((k for k, _, _ in STEPS if k not in done), None)
+                steps_ph.markdown(render_steps(done, active=nxt), unsafe_allow_html=True)
+    except Exception as e:
+        failed = e
     steps_ph.markdown(render_steps(done), unsafe_allow_html=True)
+    if failed is not None:
+        step_label = STEPS[len(done)][2] if len(done) < len(STEPS) else "finishing up"
+        st.error(f"⚠️ The run failed during **{step_label}** ({type(failed).__name__}): {html.escape(str(failed))[:250]}")
+        st.info("This is usually the AI returning malformed output — not your repo. Hit **Generate** again; it usually works on retry, and nothing was billed beyond this attempt.")
+        st.stop()
 
     m = re.search(r"github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+)", repo_url)
     repo_name = html.escape(m.group(2)) if m else "project"
@@ -377,11 +402,13 @@ if _btn:
     def _sw(items):
         items = [str(s) for s in (items or []) if str(s).strip()]
         return "".join(f"<li>{html.escape(s)}</li>" for s in items) or "<li>—</li>"
-    if not brief.get("strengths") and not brief.get("weaknesses"):
+    if brief.get("_review_failed"):
+        # The review call itself flopped — say so, don't pretend.
         st.markdown("""<div class="sw-grid anim d1">
-      <div class="sw-card"><h3>🧐 No assessment this run</h3><ul><li>The reviewer came back empty — hit Generate again and it should fill in.</li></ul></div>
+      <div class="sw-card"><h3>🧐 Review hiccup</h3><ul><li>The reviewer flopped this run — hit Generate again and it should fill in.</li></ul></div>
     </div>""", unsafe_allow_html=True)
     else:
+        # Genuine empty verdict? Leave it empty — no nagging, no invented content.
         st.markdown(f"""<div class="sw-grid anim d1">
       <div class="sw-card strengths"><h3>💪 Strengths</h3><ul>{_sw(brief.get("strengths"))}</ul></div>
       <div class="sw-card weaknesses"><h3>🧐 Weaknesses</h3><ul>{_sw(brief.get("weaknesses"))}</ul></div>
