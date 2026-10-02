@@ -313,13 +313,56 @@ def _gh_headers():
         h["Authorization"] = f"Bearer {GITHUB_TOKEN}"
     return h
 
+def _gh_api(url, want_json=True):
+    """api.github.com GET with retries. Returns (True, data) on success, (False, err)
+    after retries. Raises immediately with a clear, actionable message on rate limiting."""
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = requests.get(url, timeout=25, headers=_gh_headers())
+        except requests.RequestException as e:
+            last_err = e
+        else:
+            if r.status_code == 200:
+                try:
+                    return True, (r.json() if want_json else r.text)
+                except ValueError as e:
+                    last_err = e
+            elif r.status_code == 403 and "rate limit" in r.text.lower():
+                raise RuntimeError(
+                    "GitHub API rate limit hit — Streamlit Cloud shares outbound IPs, so the "
+                    "60-requests/hour unauthenticated quota gets eaten fast. Fix (one minute, free): "
+                    "create a personal access token at github.com → Settings → Developer settings → "
+                    "Personal access tokens (no scopes needed for public repos), then add it to the "
+                    "app's Secrets as GITHUB_TOKEN. That raises the quota to 5,000/hour.")
+            elif r.status_code in (404, 410):
+                return False, None  # normal: repo has no README, odd default branch, etc.
+            else:
+                last_err = RuntimeError(f"GitHub HTTP {r.status_code}: {r.text[:120]}")
+        time.sleep(2 * (attempt + 1))
+    return False, last_err
+
+def _gh_raw(url):
+    """raw.githubusercontent.com GET with retries (no API quota here, just blips)."""
+    for attempt in range(3):
+        try:
+            r = requests.get(url, timeout=25, headers={"Accept": "application/vnd.github.raw"})
+            if r.status_code == 200:
+                return r.text
+        except requests.RequestException:
+            pass
+        time.sleep(2 * (attempt + 1))
+    return ""
+
 def _gh_json(url):
-    r = requests.get(url, timeout=25, headers=_gh_headers())
-    return r.json() if r.status_code == 200 else None
+    ok, data = _gh_api(url, want_json=True)
+    return data if ok else None
 
 def _gh_text(url):
-    r = requests.get(url, timeout=25, headers={"Accept": "application/vnd.github.raw"})
-    return r.text if r.status_code == 200 else ""
+    if "raw.githubusercontent.com" in url:
+        return _gh_raw(url)
+    ok, data = _gh_api(url, want_json=False)
+    return data if ok else ""
 
 def fetch_repo(repo_url):
     """Returns dict with labeled context sections. Raises RuntimeError on failure."""
