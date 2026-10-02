@@ -161,7 +161,9 @@ def _to_ssml(text, voice):
 
 def _tts_bytes(ssml_text, voice):
     async def _run():
-        communicate = edge_tts.Communicate(ssml=ssml_text, voice=voice)
+        # NOTE: edge_tts has no `ssml=` kwarg — the SSML string goes in as `text`
+        # (the service sniffs the <speak> tag). Passing ssml= raises TypeError.
+        communicate = edge_tts.Communicate(ssml_text, voice)
         chunks = []
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
@@ -359,18 +361,52 @@ Repo context:
 Return STRICT JSON with exactly these fields:
 {{
   "explainer": "120-180 words. Explain this repo to a smart friend who doesn't code. No jargon; if you must use a technical term, define it in the same sentence.",
-  "short_text": "2-3 sentences. The absolute essence: what it is + why it matters.",
+  "short_text": "2-3 sentences COMPRESSED FROM your explainer above — same facts, shorter. This is never empty and never 'not clear from context' when the explainer exists.",
   "how_it_works": ["4-6 steps, in order, one sentence each. Each step must cite the file(s) it comes from, e.g. [src/render.ts]. Steps must form a chain: the output of step N is the input of step N+1. If a step can't be tied to a file in the context, drop it — do not bridge gaps with guesses."],
-  "audience": "who this is for, specifically (not 'developers' — which developers, doing what)",
-  "proof_points": ["3-5 concrete, verifiable facts from the context: numbers, features, file names, commands"]
+  "audience": "who this is for, specifically (not 'developers' — which developers, doing what). Derive from the repo context, never leave empty.",
+  "proof_points": ["3-5 concrete, verifiable facts from the context: numbers, features, file names, commands. Never empty when the context has code."]
 }}
 {STRICT_JSON}"""
+    def _problems(b):
+        if not isinstance(b, dict):
+            return ["response was not a JSON object"]
+        ps = []
+        if not str(b.get("explainer", "")).strip():
+            ps.append("explainer")
+        if not str(b.get("short_text", "")).strip():
+            ps.append("short_text")
+        hiw = b.get("how_it_works", [])
+        if not isinstance(hiw, list) or not [s for s in hiw if str(s).strip()]:
+            ps.append("how_it_works")
+        if not str(b.get("audience", "")).strip():
+            ps.append("audience")
+        pp = b.get("proof_points", [])
+        if not isinstance(pp, list) or not [s for s in pp if str(s).strip()]:
+            ps.append("proof_points")
+        return ps
+
     b = do_call(prompt, max_tokens=1800, temperature=0.1, label="Understanding the project")
-    # hard quality gate: reject banned words, ask once for a clean rewrite
-    blob = json.dumps(b).lower()
-    if any(w in blob for w in REJECT_WORDS):
-        b = do_call(prompt + "\nYour last response used banned generic-marketing words. Rewrite every field avoiding them completely.",
+    # Validate — never let empty fields slip through silently (they poison
+    # every downstream step: empty short_text once made the social kit invent
+    # a whole different project). Re-ask for exactly what's missing.
+    for _ in range(2):
+        missing = _problems(b)
+        banned = [w for w in REJECT_WORDS if w in json.dumps(b).lower()]
+        if not missing and not banned:
+            break
+        bits = []
+        if missing:
+            bits.append("these fields were empty or missing: " + ", ".join(missing)
+                        + " — fill every one from the repo context, no exceptions")
+        if banned:
+            bits.append("you used banned generic-marketing words (" + ", ".join(banned)
+                        + ") — rewrite avoiding them completely")
+        b = do_call(prompt + "\nYour last response had problems: " + "; ".join(bits)
+                    + ". Return the full corrected JSON.",
                     max_tokens=1800, temperature=0.1, label="Understanding the project")
+    missing = _problems(b)
+    if missing:
+        raise RuntimeError(f"the AI left these fields empty after retries: {', '.join(missing)}")
     return b
 
 def make_diagram(brief):
@@ -389,9 +425,17 @@ Rules:
 
 Return STRICT JSON: {{"mermaid": "flowchart TD\\n    A[First thing] --> B[Second thing]"}}
 {STRICT_JSON}"""
-    out = do_call(prompt, max_tokens=800, temperature=0.1, label="Drawing the diagram")
-    code = out.get("mermaid", "")
-    return re.sub(r'```(?:mermaid)?', '', code).strip()
+    code = ""
+    for attempt in range(2):
+        p = (prompt if attempt == 0
+             else prompt + "\nYour last response was not Mermaid code. Output ONLY the flowchart code "
+                          "starting with 'flowchart TD' inside the JSON — no explanations, no JSON dumps.")
+        out = do_call(p, max_tokens=800, temperature=0.1, label="Drawing the diagram")
+        code = re.sub(r'```(?:mermaid)?', '', str(out.get("mermaid", ""))).strip()
+        if code.startswith("flowchart") or code.startswith("graph"):
+            break
+        code = ""
+    return code
 
 EXAMPLE_ITEM = ('{"angle": "THE PROBLEM", "hook": "Dinner panic at 7pm again?", '
                 '"visual_hint": "empty fridge glowing in a dark kitchen", '
