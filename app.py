@@ -24,6 +24,7 @@ import streamlit as st
 # ================= CONFIG =================
 DO_API_KEY = st.secrets.get("DO_API_KEY", "")
 ALIBABA_API_KEY = st.secrets.get("ALIBABA_API_KEY", "")
+GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", "")  # optional: raises GitHub API quota 60 -> 5000/hr
 DO_MODEL = "openai-gpt-oss-20b"
 QWEN_URL = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 QWEN_MODEL = "qwen-image-max"
@@ -98,9 +99,13 @@ def do_call(prompt, max_tokens, temperature, label="AI step", _tries=3):
             except (requests.RequestException, ValueError) as e:
                 last_err = e
                 continue
+        if not isinstance(res_data, dict):
+            last_err = ValueError(f"unexpected API response shape: {type(res_data).__name__}")
+            continue
         raw_content = ""
         if "choices" in res_data and len(res_data["choices"]) > 0:
-            raw_content = res_data["choices"][0].get("message", {}).get("content", "")
+            msg = res_data["choices"][0].get("message") or {}
+            raw_content = msg.get("content", "") or ""
         else:
             raw_content = res_data.get("output", "") or res_data.get("text", "")
         if isinstance(raw_content, list):
@@ -208,10 +213,24 @@ def qwen_image(prompt):
     except Exception:
         return None, "non-JSON response"
     out = (data.get("output") or {})
-    results = out.get("results") or []
-    if not results:
-        return None, f"no results: {json.dumps(data)[:200]}"
-    url = results[0].get("url", "")
+    img_url = ""
+    # shape 1 (observed live): output.choices[0].message.content[].image
+    for ch in out.get("choices", []) or []:
+        msg = (ch.get("message") or {})
+        for item in msg.get("content", []) or []:
+            if isinstance(item, dict) and item.get("image"):
+                img_url = item["image"]
+                break
+        if img_url:
+            break
+    # shape 2 (documented): output.results[0].url
+    if not img_url:
+        results = out.get("results") or []
+        if results:
+            img_url = results[0].get("url", "")
+    if not img_url:
+        return None, f"no image in response: {json.dumps(data)[:200]}"
+    url = img_url
     if url.startswith("data:"):
         try:
             return base64.b64decode(url.split(",", 1)[1]), ""
@@ -225,7 +244,7 @@ def qwen_image(prompt):
             return None, f"download HTTP {r.status_code}"
         except Exception as e:
             return None, f"download failed: {str(e)[:120]}"
-    return None, f"unexpected result: {json.dumps(results[0])[:200]}"
+    return None, f"unexpected image value: {url[:120]}"
 
 # ================= DIAGRAM (Mermaid -> image) =================
 def mermaid_image_url(code):
@@ -252,8 +271,14 @@ SKIP_PARTS = ("node_modules", ".git/", "dist/", "build/", "__pycache__", ".next/
               "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock")
 JUNK_FILES = ("package-lock.json", "yarn.lock")
 
+def _gh_headers():
+    h = {"Accept": "application/vnd.github+json"}
+    if GITHUB_TOKEN:
+        h["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    return h
+
 def _gh_json(url):
-    r = requests.get(url, timeout=25, headers={"Accept": "application/vnd.github+json"})
+    r = requests.get(url, timeout=25, headers=_gh_headers())
     return r.json() if r.status_code == 200 else None
 
 def _gh_text(url):
@@ -308,7 +333,16 @@ def fetch_repo(repo_url):
         f"<package_json>\n{pkg}\n</package_json>\n"
         f"<code>\n" + "\n\n".join(excerpts)[:6000] + "\n</code>"
     )
-    return {"owner": owner, "repo": repo, "meta": meta, "context": context}
+    stats = {"readme_chars": len(readme), "files": len(paths), "excerpts": len(excerpts)}
+    # Never generate marketing from thin air: if GitHub gave us nothing usable,
+    # fail loudly instead of letting the model hallucinate a different project.
+    if not readme.strip() and not paths:
+        raise RuntimeError(
+            "GitHub returned no README and no file list for this repo "
+            "(API rate-limited, repo private/renamed, or network hiccup). "
+            "Tip: add a free GITHUB_TOKEN (no scopes needed) to the app's Secrets "
+            "to raise the GitHub API quota from 60 to 5000 requests/hour.")
+    return {"owner": owner, "repo": repo, "meta": meta, "context": context, "stats": stats}
 
 # ================= LLM CALLS =================
 def comprehend(ctx):
@@ -527,7 +561,7 @@ div[data-testid="stDownloadButton"] button:hover{background:var(--ink)!important
 div[data-testid="stExpander"]{border:1px solid var(--line)!important;border-radius:12px!important;}
 .report-row{display:flex;justify-content:space-between;font-size:13.5px;padding:8px 0;border-bottom:1px solid var(--line);color:#404040;}
 .report-row:last-child{border:none;}
-.ok{color:#15803d;font-weight:700;} .bad{color:#b91c1c;font-weight:700;}
+.ok{color:#15803d;font-weight:700;} .bad{color:#b91c1c;font-weight:700;} .info{color:var(--muted);font-weight:600;}
 .footer{margin-top:72px;padding-top:24px;border-top:1px solid var(--line);text-align:center;font-size:12.5px;color:var(--muted);}
 .stAlert{border-radius:10px!important;}
 
@@ -625,10 +659,13 @@ if go:
         tick("social")
 
         images = []
-        for it in items:
+        for idx, it in enumerate(items):
+            if idx:
+                time.sleep(4)  # breathing room: Alibaba throttles rapid-fire requests
             png, err = qwen_image(hook_image_prompt(it.get("hook", ""), it.get("visual_hint", "abstract minimal shapes")))
             images.append({"png": png, "err": err})
         results["images"] = images
+        results["stats"] = repo.get("stats", {})
         tick("visuals")
 
         try:
@@ -729,12 +766,16 @@ if go:
     # report
     with st.expander("Generation report"):
         rows = []
+        stt = results.get("stats", {})
+        rows.append(("Repo context",
+                     f"{stt.get('readme_chars', 0)} readme chars, "
+                     f"{stt.get('files', 0)} files, {stt.get('excerpts', 0)} code excerpts"))
         rows.append(("Diagram", "OK" if results["diagram"] else f"FAILED — {results['diagram_err'][:100]}"))
         for i, im in enumerate(results["images"]):
             rows.append((f"Visual {i+1}", "OK" if im["png"] else f"FAILED — {str(im['err'])[:100]}"))
         rows.append(("Audio", "OK" if results["audio"] else f"FAILED — {results['audio_err'][:100]}"))
         for label, status in rows:
-            cls = "ok" if status == "OK" else "bad"
+            cls = "ok" if status == "OK" else ("info" if label == "Repo context" else "bad")
             st.markdown(f'<div class="report-row"><span>{html.escape(label)}</span>'
                         f'<span class="{cls}">{html.escape(status)}</span></div>', unsafe_allow_html=True)
         for w in warnings:
