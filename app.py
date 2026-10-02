@@ -15,7 +15,6 @@ import html
 import time
 import asyncio
 import base64
-import tempfile
 
 import requests
 import edge_tts
@@ -123,7 +122,10 @@ def do_call(prompt, max_tokens, temperature, label="AI step", _tries=3):
         try:
             if not final_json.strip():
                 raise ValueError("empty model output")
-            return json.loads(final_json)
+            parsed = json.loads(final_json)
+            if not isinstance(parsed, dict):
+                raise ValueError(f"model returned JSON {type(parsed).__name__}, not an object")
+            return parsed
         except (json.JSONDecodeError, ValueError) as e:
             last_err = e
             if final_json.strip():
@@ -491,6 +493,11 @@ def build_diagram(steps):
         return ""
     edges = "\n".join(f"    N{i} --> N{i+1}" for i in range(len(nodes) - 1))
     return "flowchart TD\n" + "\n".join(nodes) + ("\n" + edges if edges else "")
+
+EXAMPLE_ITEM = ('{"angle": "THE PROBLEM", "hook": "Dinner panic at 7pm again?", '
+                '"visual_hint": "empty fridge glowing in a dark kitchen", '
+                '"caption": "You open the fridge. Nothing makes sense together.\\nChefBot looks at what you actually have and builds dinner around it — no shopping trip.", '
+                '"hashtags": ["#mealprep", "#home cooking", "#foodtech", "#indiehackers"]}')
 
 def make_social(brief):
     """Call 3 — 4 angle-assigned social items. temp 0.7 for creativity."""
