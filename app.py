@@ -109,22 +109,36 @@ def search_online_recipes(ingredients: list, cuisine: str = "Anything") -> list:
 
 # ── Accurate Food Photo Pipeline (Matches Exactly What You Cook) ───────────────
 def get_accurate_dish_image(dish_name: str, fallback_thumb: str = "") -> str:
-    """Fetch high-definition food photograph strictly matching the actual dish."""
+    """Take dish title, search online directly for the same dish, and fetch the real photo."""
     if fallback_thumb and fallback_thumb.startswith("http"):
         return fallback_thumb
 
     s = requests.Session()
-    s.headers.update({"User-Agent": "FridgeSnapBot/2.0 (culinary-assistant)"})
+    s.headers.update({"User-Agent": "FridgeSnapBot/3.0 (culinary-assistant; contact@fridgesnap.org)"})
 
-    # Strategy 1: Exact / partial search in culinary database
-    words = [w for w in re.split(r"[^\w]+", dish_name) if len(w) > 2]
-    search_queries = [dish_name]
-    if words:
-        search_queries.append(words[0])
-        if len(words) > 1:
-            search_queries.append(words[-1])
+    clean_title = re.sub(r"[^\w\s-]", " ", dish_name).strip()
 
-    for q in search_queries:
+    # 1. Primary: Search Openverse directly online for the exact dish title
+    search_attempts = [clean_title]
+    words = clean_title.split()
+    if len(words) > 3:
+        search_attempts.append(" ".join(words[:3]))
+
+    for q in search_attempts:
+        try:
+            url = f"https://api.openverse.org/v1/images/?q={urllib.parse.quote(q)}&page_size=4"
+            r = s.get(url, timeout=4)
+            if r.status_code == 200:
+                results = r.json().get("results", [])
+                for item in results:
+                    img_url = item.get("url")
+                    if img_url and not img_url.endswith(".svg"):
+                        return img_url
+        except Exception:
+            pass
+
+    # 2. Secondary: TheMealDB search for exact or clean dish name
+    for q in search_attempts:
         try:
             r = s.get(f"https://www.themealdb.com/api/json/v1/1/search.php?s={urllib.parse.quote(q)}", timeout=3)
             if r.status_code == 200:
@@ -134,40 +148,19 @@ def get_accurate_dish_image(dish_name: str, fallback_thumb: str = "") -> str:
         except Exception:
             pass
 
-    # Strategy 2: Common multilingual culinary translations to culinary database
-    translations = {
-        "poulet": "chicken", "boeuf": "beef", "porc": "pork", "legumes": "vegetable",
-        "salade": "salad", "oeuf": "egg", "fromage": "cheese", "poisson": "fish",
-        "crevette": "prawn", "riz": "rice", "pates": "pasta", "soupe": "soup"
-    }
-    dish_lower = dish_name.lower()
-    for foreign, eng in translations.items():
-        if foreign in dish_lower:
-            try:
-                r = s.get(f"https://www.themealdb.com/api/json/v1/1/search.php?s={eng}", timeout=3)
-                if r.status_code == 200:
-                    meals = r.json().get("meals")
-                    if meals and meals[0].get("strMealThumb"):
-                        return meals[0]["strMealThumb"]
-            except Exception:
-                pass
-            break
-
-    # Strategy 3: Wikimedia Commons High-Res Food Photography (Filtered: only real dish photos, NO PDFs/menus)
+    # 3. Tertiary: Filtered Wikimedia Commons photo search (real food photos only)
     try:
-        clean = re.sub(r"[^\w\s]", " ", dish_name).strip()
         url = (
             "https://commons.wikimedia.org/w/api.php?action=query"
             "&generator=search&gsrnamespace=6"
-            f"&gsrsearch={urllib.parse.quote(clean + ' cooked dish food')}"
-            "&gsrlimit=8&prop=imageinfo&iiprop=url&iiurlwidth=800&format=json"
+            f"&gsrsearch={urllib.parse.quote(clean_title + ' food')}"
+            "&gsrlimit=6&prop=imageinfo&iiprop=url&iiurlwidth=800&format=json"
         )
         r = s.get(url, timeout=4)
         if r.status_code == 200:
             pages = r.json().get("query", {}).get("pages", {})
             for _, page in pages.items():
                 title = page.get("title", "").lower()
-                # Exclude document scans, menus, covers, books
                 if any(bad in title for bad in [".pdf", ".svg", ".tif", "menu", "carte", "book", "cover", "text", "label"]):
                     continue
                 if any(ext in title for ext in [".jpg", ".jpeg", ".png", ".webp"]):
@@ -177,9 +170,9 @@ def get_accurate_dish_image(dish_name: str, fallback_thumb: str = "") -> str:
     except Exception:
         pass
 
-    # Strategy 4: Wikipedia Page Summary (direct match)
+    # 4. Wikipedia summary
     try:
-        slug = urllib.parse.quote(dish_name.replace(" ", "_"))
+        slug = urllib.parse.quote(clean_title.replace(" ", "_"))
         r = s.get(f"https://en.wikipedia.org/api/rest_v1/page/summary/{slug}", timeout=3)
         if r.status_code == 200:
             d = r.json()
@@ -189,7 +182,7 @@ def get_accurate_dish_image(dish_name: str, fallback_thumb: str = "") -> str:
     except Exception:
         pass
 
-    # Final culinary fallback: high-res gourmet dish photography
+    # Final fallback: high-res generic gourmet plate
     return "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=800&auto=format&fit=crop&q=80"
 
 # ── Image prep ──────────────────────────────────────────────────────────────────
