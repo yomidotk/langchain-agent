@@ -24,7 +24,6 @@ import streamlit as st
 # ================= CONFIG =================
 DO_API_KEY = st.secrets.get("DO_API_KEY", "")
 ALIBABA_API_KEY = st.secrets.get("ALIBABA_API_KEY", "")
-DO_URL = "https://inference.do-ai.run/v1/responses"
 DO_MODEL = "openai-gpt-oss-20b"
 QWEN_URL = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 QWEN_MODEL = "qwen-image-max"
@@ -44,23 +43,61 @@ REJECT_WORDS = ("revolutionary", "game-changing", "game changing", "cutting-edge
                 "delve", "tapestry", "furthermore")
 
 # ================= LLM =================
-def do_call(prompt, max_tokens, temperature, _tries=3):
-    """Call the LLM and return parsed JSON. 3 attempts, escalating token limits,
-    brief pauses between retries, clear RuntimeError if the model keeps flaking."""
+DO_CHAT_URL = "https://inference.do-ai.run/v1/chat/completions"
+DO_RESP_URL = "https://inference.do-ai.run/v1/responses"  # fallback if chat endpoint rejects us
+
+def _post(url, payload):
+    r = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {DO_API_KEY}", "Content-Type": "application/json"},
+        json=payload, timeout=180)
+    r.raise_for_status()
+    return r.json()
+
+def do_call(prompt, max_tokens, temperature, label="AI step", _tries=3):
+    """Call the LLM and return parsed JSON.
+
+    The real fix (not a retry curtain): the primary path uses the chat-completions
+    endpoint with response_format={"type": "json_object"} — constrained decoding,
+    so the model cannot return prose, markdown, or empty output. If that endpoint
+    rejects the request (400/404/422), we fall back to /v1/responses automatically.
+    The few retries that remain are only a safety net for network hiccups and
+    truncated responses (which get more tokens on retry)."""
     original = prompt
     last_err = None
+    raw_preview = ""
+    use_chat = True
     for attempt in range(_tries):
         tok = int(max_tokens * (1.6 ** attempt))
+        t = temperature if attempt == 0 else 0.0
         if attempt > 0:
-            time.sleep(2 * attempt)
-        response = requests.post(
-            DO_URL,
-            headers={"Authorization": f"Bearer {DO_API_KEY}", "Content-Type": "application/json"},
-            json={"model": DO_MODEL, "input": prompt, "max_output_tokens": tok,
-                  "temperature": temperature, "stream": False},
-            timeout=180)
-        response.raise_for_status()
-        res_data = response.json()
+            time.sleep(min(2 * attempt, 8))
+        res_data = None
+        if use_chat:
+            try:
+                res_data = _post(DO_CHAT_URL, {
+                    "model": DO_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": tok, "temperature": t,
+                    "response_format": {"type": "json_object"}, "stream": False})
+            except requests.HTTPError as e:
+                code = e.response.status_code if e.response is not None else 0
+                if code in (400, 404, 422):
+                    use_chat = False  # JSON mode unsupported here; fall back below
+                else:
+                    last_err = e
+                    continue
+            except (requests.RequestException, ValueError) as e:
+                last_err = e
+                continue
+        if res_data is None:
+            try:
+                res_data = _post(DO_RESP_URL, {
+                    "model": DO_MODEL, "input": prompt, "max_output_tokens": tok,
+                    "temperature": t, "stream": False})
+            except (requests.RequestException, ValueError) as e:
+                last_err = e
+                continue
         raw_content = ""
         if "choices" in res_data and len(res_data["choices"]) > 0:
             raw_content = res_data["choices"][0].get("message", {}).get("content", "")
@@ -74,22 +111,25 @@ def do_call(prompt, max_tokens, temperature, _tries=3):
                         raw_content = sub[0].get("text", "")
         if not isinstance(raw_content, str):
             raw_content = json.dumps(raw_content)
+        raw_preview = raw_content[:200]
         clean_text = re.sub(r'```(?:json)?', '', raw_content).strip()
         match = re.search(r'\{.*\}', clean_text, re.DOTALL)
         final_json = match.group(0) if match else clean_text
         try:
             if not final_json.strip():
-                raise ValueError(f"empty model output (response keys: {list(res_data.keys())[:6]})")
+                raise ValueError("empty model output")
             return json.loads(final_json)
         except (json.JSONDecodeError, ValueError) as e:
             last_err = e
             if final_json.strip():
-                prompt = ("Your previous response was not valid JSON (cut off or malformed). "
+                prompt = ("Your previous response was cut off. "
                           "Return the COMPLETE object again as valid JSON only, every field, full text, "
                           "no truncation, no markdown fences.\n\nBroken output:\n" + final_json[:6000])
             else:
-                prompt = original + "\n\nRespond with valid JSON only, no other text."
-    raise RuntimeError(f"AI returned invalid JSON after {_tries} tries ({last_err})")
+                prompt = ("Your last response was empty. Output ONLY the complete JSON object now, "
+                          "no other text, no explanations.\n\nTask:\n" + original[:8000])
+    raise RuntimeError(f"{label} failed after {_tries} tries ({last_err}). "
+                       f"Last model output: {raw_preview[:150]!r}")
 
 # ================= SPEECH =================
 def _clean_spoken(text):
@@ -291,12 +331,12 @@ Return STRICT JSON with exactly these fields:
   "proof_points": ["3-5 concrete, verifiable facts from the context: numbers, features, file names, commands"]
 }}
 {STRICT_JSON}"""
-    b = do_call(prompt, max_tokens=1800, temperature=0.1)
+    b = do_call(prompt, max_tokens=1800, temperature=0.1, label="Understanding the project")
     # hard quality gate: reject banned words, ask once for a clean rewrite
     blob = json.dumps(b).lower()
     if any(w in blob for w in REJECT_WORDS):
         b = do_call(prompt + "\nYour last response used banned generic-marketing words. Rewrite every field avoiding them completely.",
-                    max_tokens=1800, temperature=0.1)
+                    max_tokens=1800, temperature=0.1, label="Understanding the project")
     return b
 
 def make_diagram(brief):
@@ -315,7 +355,7 @@ Rules:
 
 Return STRICT JSON: {{"mermaid": "flowchart TD\\n    A[First thing] --> B[Second thing]"}}
 {STRICT_JSON}"""
-    out = do_call(prompt, max_tokens=800, temperature=0.1)
+    out = do_call(prompt, max_tokens=800, temperature=0.1, label="Drawing the diagram")
     code = out.get("mermaid", "")
     return re.sub(r'```(?:mermaid)?', '', code).strip()
 
@@ -349,7 +389,7 @@ Per item return: "angle", "hook" (5-9 words, curiosity gap, plain words that ren
 
 Return STRICT JSON: {{"items": [4 items]}}
 {STRICT_JSON}"""
-    out = do_call(prompt, max_tokens=2800, temperature=0.7)
+    out = do_call(prompt, max_tokens=2800, temperature=0.7, label="Writing the social kit")
     items = out.get("items", [])
     return [it for it in items if isinstance(it, dict) and it.get("hook")][:4]
 
@@ -371,7 +411,7 @@ Score EACH item 1-5 on:
 For any item scoring below 4 on any axis, rewrite ONLY that item (keep its angle, keep the same JSON shape).
 Return the full corrected set as STRICT JSON: {{"items": [4 items]}}
 {STRICT_JSON}"""
-    out = do_call(prompt, max_tokens=2800, temperature=0.2)
+    out = do_call(prompt, max_tokens=2800, temperature=0.2, label="Reviewing the social kit")
     fixed = [it for it in out.get("items", []) if isinstance(it, dict) and it.get("hook")]
     return fixed[:4] if fixed else items
 
@@ -396,12 +436,12 @@ Write for the EAR, not the eye:
 
 Return STRICT JSON: {{"script": "..."}}
 {STRICT_JSON}"""
-    out = do_call(prompt, max_tokens=900, temperature=0.5)
+    out = do_call(prompt, max_tokens=900, temperature=0.5, label="Writing the voiceover")
     script = _clean_spoken(out.get("script", ""))
     # hard gate: no URLs/domains may survive into the script
     if re.search(r"https?://|\bwww\.|\b(?:[a-zA-Z0-9-]+\.)+(?:com|io|dev|app|net|org)\b", script):
         out = do_call(prompt + "\nYour last script contained a URL or domain name. Rewrite with zero URLs, zero domains.",
-                      max_tokens=900, temperature=0.5)
+                      max_tokens=900, temperature=0.5, label="Writing the voiceover")
         script = _clean_spoken(out.get("script", ""))
     return script
 
@@ -547,22 +587,40 @@ if go:
         nxt = next((k for k in order if k not in done), None)
         steps_ph.markdown(render_steps(done, active=nxt), unsafe_allow_html=True)
 
+    # ---- fatal section: everything downstream needs the repo + the brief ----
+    current = "Reading the repo"
     try:
         steps_ph.markdown(render_steps(done, active="fetch"), unsafe_allow_html=True)
         repo = fetch_repo(repo_url.strip())
         tick("fetch")
 
+        current = "Understanding the project"
         brief = comprehend(repo["context"])
         results["brief"] = brief
         tick("comprehend")
+    except Exception as e:
+        failed = (current, e)
 
-        mermaid = make_diagram(brief)
-        d_bytes, d_err = fetch_diagram(mermaid)
+    # ---- soft sections: a failure degrades one section, never the run ----
+    warnings = []
+    if failed is None:
+        try:
+            mermaid = make_diagram(brief)
+            d_bytes, d_err = fetch_diagram(mermaid)
+            if d_err:
+                warnings.append(f"Diagram render: {d_err}")
+        except Exception as e:
+            mermaid, d_bytes, d_err = "", None, str(e)[:150]
+            warnings.append(f"Diagram: {str(e)[:150]}")
         results.update(mermaid=mermaid, diagram=d_bytes, diagram_err=d_err)
         tick("diagram")
 
-        items = make_social(brief)
-        items = critique_social(brief, items)
+        try:
+            items = make_social(brief)
+            items = critique_social(brief, items)
+        except Exception as e:
+            items = []
+            warnings.append(f"Social kit: {str(e)[:150]}")
         results["items"] = items
         tick("social")
 
@@ -573,17 +631,27 @@ if go:
         results["images"] = images
         tick("visuals")
 
-        script = make_voiceover(brief)
-        audio, a_err = make_audio(script)
+        try:
+            script = make_voiceover(brief)
+        except Exception as e:
+            script = ""
+            warnings.append(f"Voiceover script: {str(e)[:150]}")
+        if script:
+            audio, a_err = make_audio(script)
+            if a_err:
+                warnings.append(f"Audio: {a_err}")
+        else:
+            audio, a_err = None, "script unavailable"
         results.update(script=script, audio=audio, audio_err=a_err)
         tick("audio")
-    except Exception as e:
-        failed = e
 
     steps_ph.markdown(render_steps(done), unsafe_allow_html=True)
     if failed is not None:
-        st.error(f"Something broke ({type(failed).__name__}): {html.escape(str(failed))[:250]}")
-        st.info("Usually the AI returning malformed output — hit **Generate the story** again and it normally works on retry.")
+        step_label, e = failed
+        st.error(f"The run stopped while {step_label.lower()}.")
+        st.write(f"**What happened:** {html.escape(str(e)[:400])}")
+        with st.expander("Technical details"):
+            st.code(f"{type(e).__name__}: {e}")
         st.stop()
 
     brief, items = results["brief"], results["items"]
@@ -627,12 +695,15 @@ if go:
                            file_name=f"{repo_name}_explainer.mp3", mime="audio/mp3")
     else:
         st.warning(f"Audio failed: {html.escape(results['audio_err'][:150])}")
-    st.markdown(f'<p class="script">"{html.escape(results["script"])}"</p>', unsafe_allow_html=True)
+    if results["script"]:
+        st.markdown(f'<p class="script">"{html.escape(results["script"])}"</p>', unsafe_allow_html=True)
     st.markdown('</div></div>', unsafe_allow_html=True)
 
     # 5 — instagram kit
     st.markdown('<div class="sec"><div class="sec-kicker">Instagram kit</div>'
                 '<div class="sec-h">Four hooks. Four captions. Zero repetition.</div>', unsafe_allow_html=True)
+    if not items:
+        st.warning("The social kit couldn't be generated this run — everything else on this page is fine.")
     for i, it in enumerate(items):
         img = results["images"][i] if i < len(results["images"]) else {"png": None, "err": "missing"}
         tags = "".join(f'<span class="tag">#{html.escape(str(t).lstrip("#"))}</span>' for t in it.get("hashtags", []))
@@ -666,6 +737,9 @@ if go:
             cls = "ok" if status == "OK" else "bad"
             st.markdown(f'<div class="report-row"><span>{html.escape(label)}</span>'
                         f'<span class="{cls}">{html.escape(status)}</span></div>', unsafe_allow_html=True)
+        for w in warnings:
+            st.markdown(f'<div class="report-row"><span>Notice</span>'
+                        f'<span class="bad">{html.escape(w)}</span></div>', unsafe_allow_html=True)
 
 st.markdown('<div class="footer">HypeRepo — paste a repo, get its story. Built from real code, not templates.</div>',
             unsafe_allow_html=True)
