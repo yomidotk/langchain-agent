@@ -7,7 +7,8 @@ import base64
 import io
 import requests
 import streamlit as st
-from gtts import gTTS
+import dashscope
+from dashscope.audio.tts import SpeechSynthesizer
 from pydantic import BaseModel, Field
 from typing import List
 
@@ -124,11 +125,13 @@ def generate_recipes_langchain(ingredients, cuisine, diet, max_time, servings, k
 
 # ================= AUDIO TTS =================
 def generate_audio(recipe_idx, title, steps):
+    dashscope.api_key = ALIBABA_API_KEY
     text = f"Here is the recipe for {title}. " + " ".join([f"Step {i+1}: {step}" for i, step in enumerate(steps)])
-    tts = gTTS(text=text, lang='en')
-    buf = io.BytesIO()
-    tts.write_to_fp(buf)
-    st.session_state[f"audio_{recipe_idx}"] = buf.getvalue()
+    result = SpeechSynthesizer.call(model='sambert-zhichu-v1', text=text[:300], format='mp3')
+    if result.get_audio_data() is not None:
+        st.session_state[f"audio_{recipe_idx}"] = result.get_audio_data()
+    else:
+        st.error(f"Voice generation failed: {result.message}")
 
 # ================= UI & CSS =================
 _CSS = """

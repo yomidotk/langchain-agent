@@ -1,4 +1,6 @@
 streamlit
-langgraph
-edge-tts
 requests
+langchain
+langchain-openai
+pydantic
+dashscope
