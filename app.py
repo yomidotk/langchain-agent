@@ -1,4 +1,4 @@
-"""FridgeSnap — snap your fridge, get recipes."""
+"""FridgeSnap LangChain Agent — snap your fridge, get recipes, hear them."""
 import re
 import json
 import html
@@ -7,21 +7,21 @@ import base64
 import io
 import requests
 import streamlit as st
+from gtts import gTTS
+from pydantic import BaseModel, Field
+from typing import List
+
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser
 
 # ================= CONFIG =================
 DO_API_KEY = st.secrets.get("DO_API_KEY", "")
 ALIBABA_API_KEY = st.secrets.get("ALIBABA_API_KEY", "")
-DO_URL = "https://inference.do-ai.run/v1/chat/completions"
+DO_URL = "https://inference.do-ai.run/v1"
 DO_MODEL = "openai-gpt-oss-20b"
 VISION_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
 VISION_MODEL = "qwen-vl-max"
-
-STRICT_JSON = """
-OUTPUT RULES (follow exactly):
-- Return STRICT JSON ONLY. No prose before or after, no markdown fences, no comments.
-- Double quotes on all keys and strings. No trailing commas.
-- Include every required field. If a field is truly unknown, use "" or [] — never invent a value.
-- Your response must start with { and end with }."""
 
 CUISINES = ["Anything", "Italian", "Mexican", "Middle Eastern", "Asian", "Indian", "Mediterranean", "French", "American"]
 DIETS = ["No restriction", "Vegetarian", "Vegan", "Halal", "Gluten-free", "High-protein"]
@@ -38,22 +38,11 @@ def prep_image(file_bytes, mime):
     except Exception:
         return file_bytes, mime or "image/jpeg"
 
-# ================= VISION =================
+# ================= ALIBABA VISION =================
 def detect_ingredients(img_bytes, mime):
     try:
         b64 = base64.b64encode(img_bytes).decode()
-        prompt = """You are a precise kitchen assistant. Look at this fridge/kitchen photo and list every identifiable food ingredient or item you can see.
-
-Return STRICT JSON: {"ingredients": [{"name": "eggs", "amount": "about 6", "confidence": "high"}]}
-
-Rules:
-- Only list what you can actually SEE. Never guess.
-- Names in plain English ("chicken breast").
-- amount: short visible estimate ("3", "a bunch"). Use "" if unclear.
-- confidence: high/medium/low.
-- Merge obvious duplicates.
-- If this is not a food photo, return {"ingredients": [], "not_food": true}.
-""" + STRICT_JSON
+        prompt = """You are a precise kitchen assistant. Look at this fridge/kitchen photo and list every identifiable food ingredient or item you can see. Return ONLY valid JSON: {"ingredients": [{"name": "eggs", "amount": "about 6", "confidence": "high"}]}"""
         r = requests.post(
             VISION_URL,
             headers={"Authorization": f"Bearer {ALIBABA_API_KEY}", "Content-Type": "application/json"},
@@ -64,77 +53,82 @@ Rules:
                   "temperature": 0.1},
             timeout=120)
         if r.status_code != 200:
-            return None, f"vision failed (HTTP {r.status_code})"
+            return None, f"Vision failed (HTTP {r.status_code})"
+        
         data = r.json()
         content = data["choices"][0]["message"]["content"] or ""
         clean = re.sub(r'```(?:json)?', '', content).strip()
         m = re.search(r'\{.*\}', clean, re.DOTALL)
         out = json.loads(m.group(0) if m else clean)
-        if out.get("not_food"):
-            return None, "That doesn't look like a fridge or kitchen photo — try another one."
         items = [it for it in out.get("ingredients", []) if isinstance(it, dict) and it.get("name")]
         if not items:
-            return None, "Couldn't spot any ingredients — try a clearer photo."
+            return None, "Couldn't spot any ingredients."
         return items, ""
     except Exception as e:
         return None, f"Vision error: {str(e)[:220]}"
 
-# ================= LLM =================
-def _do_text(prompt, max_tokens, temperature, label="recipe step", _tries=3):
-    last_err = None
-    for attempt in range(_tries):
-        if attempt: time.sleep(2 * attempt)
-        try:
-            r = requests.post(
-                DO_URL,
-                headers={"Authorization": f"Bearer {DO_API_KEY}", "Content-Type": "application/json"},
-                json={"model": DO_MODEL,
-                      "messages": [{"role": "user", "content": prompt}],
-                      "max_tokens": int(max_tokens * (1.5 ** attempt)),
-                      "temperature": 0.0 if attempt else temperature,
-                      "response_format": {"type": "json_object"}, "stream": False},
-                timeout=180)
-            r.raise_for_status()
-            content = r.json()["choices"][0]["message"]["content"] or ""
-        except Exception as e:
-            last_err = e
-            continue
-        clean = re.sub(r'```(?:json)?', '', content).strip()
-        m = re.search(r'\{.*\}', clean, re.DOTALL)
-        try:
-            parsed = json.loads(m.group(0) if m else clean)
-            if isinstance(parsed, dict): return parsed
-        except Exception as e:
-            last_err = e
-            prompt = ("Your last response was not valid JSON. Try again.\n\n" + (m.group(0) if m else clean)[:4000])
-    raise RuntimeError(f"{label} failed: {last_err}")
+# ================= LANGCHAIN AGENT (RECIPES) =================
+class MissingIngredient(BaseModel):
+    item: str = Field(description="The missing item")
+    swap: str = Field(description="A possible substitute from the provided ingredients")
 
-def generate_recipes(ingredients, cuisine, diet, max_time, servings, kcal_target):
+class Recipe(BaseModel):
+    title: str = Field(description="Name of the recipe")
+    character: str = Field(description="Either QUICK, HEARTY, or CREATIVE")
+    time_min: int = Field(description="Time to cook in minutes")
+    calories_est: int = Field(description="Estimated calories per serving")
+    difficulty: str = Field(description="Difficulty level")
+    uses: List[str] = Field(description="List of provided ingredients used")
+    missing: List[MissingIngredient] = Field(description="List of up to 3 missing ingredients")
+    steps: List[str] = Field(description="Step by step cooking instructions")
+    tip: str = Field(description="A helpful cooking tip")
+
+class RecipeList(BaseModel):
+    recipes: List[Recipe] = Field(description="Exactly 3 recipes")
+
+def generate_recipes_langchain(ingredients, cuisine, diet, max_time, servings, kcal_target):
+    parser = PydanticOutputParser(pydantic_object=RecipeList)
+    
+    llm = ChatOpenAI(
+        model_name=DO_MODEL,
+        openai_api_key=DO_API_KEY,
+        openai_api_base=DO_URL,
+        temperature=0.6,
+        max_tokens=3000
+    )
+    
     ing = ", ".join(ingredients)
-    kcal_line = f"Each serving must stay under ~{kcal_target} kcal (honest estimate)." if kcal_target else ""
+    kcal_line = f"Each serving must stay under ~{kcal_target} kcal." if kcal_target else ""
     diet_line = f"Dietary rule: {diet}." if diet != "No restriction" else ""
-    prompt = f"""You are a creative, practical chef. A home cook has exactly these ingredients:
-{ing}
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are a creative, practical chef agent. A home cook has exactly these ingredients:\n{ingredients}\n\nAssume basics are available (salt, pepper, oil, water). Constraints: cuisine = {cuisine}. {diet_line} Ready in under {max_time} minutes. Makes {servings} servings. {kcal_line}\n\nWrite exactly 3 recipes with DISTINCT characters: 1. QUICK, 2. HEARTY, 3. CREATIVE.\n\n{format_instructions}"),
+        ("user", "Generate the recipes now.")
+    ])
+    
+    chain = prompt | llm | parser
+    
+    try:
+        result = chain.invoke({
+            "ingredients": ing,
+            "cuisine": cuisine,
+            "diet_line": diet_line,
+            "max_time": max_time,
+            "servings": servings,
+            "kcal_line": kcal_line,
+            "format_instructions": parser.get_format_instructions()
+        })
+        return [r.model_dump() for r in result.recipes]
+    except Exception as e:
+        raise RuntimeError(f"LangChain generation failed: {e}")
 
-Assume basics are available: salt, pepper, oil, water, sugar.
-Constraints: cuisine = {cuisine}. {diet_line} Ready in under {max_time} minutes. Makes {servings} servings. {kcal_line}
-
-Write exactly 3 recipes with DISTINCT characters:
-1. QUICK — under 20 minutes, minimal effort.
-2. HEARTY — the most filling, complete meal of the three.
-3. CREATIVE — a surprising but delicious combo.
-
-RULES:
-- "uses" may ONLY contain items from the list above.
-- "missing": at most 3 extra items per recipe, common pantry things only.
-- Steps: 4-8 concrete, ordered, beginner-friendly.
-
-Return STRICT JSON: {{"recipes": [{{"title": "...", "character": "QUICK|HEARTY|CREATIVE", "time_min": 15, "calories_est": 450, "difficulty": "Easy", "uses": ["eggs"], "missing": [{{"item": "feta", "swap": "any cheese"}}], "steps": ["..."], "tip": "pro tip"}}]}}
-""" + STRICT_JSON
-    out = _do_text(prompt, 3000, 0.6, label="recipe generation")
-    recs = [r for r in out.get("recipes", []) if isinstance(r, dict) and r.get("title")]
-    if not recs: raise RuntimeError("The AI returned no recipes.")
-    return recs[:3]
+# ================= AUDIO TTS =================
+def generate_audio(recipe_idx, title, steps):
+    text = f"Here is the recipe for {title}. " + " ".join([f"Step {i+1}: {step}" for i, step in enumerate(steps)])
+    tts = gTTS(text=text, lang='en')
+    buf = io.BytesIO()
+    tts.write_to_fp(buf)
+    st.session_state[f"audio_{recipe_idx}"] = buf.getvalue()
 
 # ================= UI & CSS =================
 _CSS = """
@@ -218,17 +212,20 @@ div[data-testid="stExpander"]{border:1px solid var(--border)!important;border-ra
 .shop li{font-size:15px;line-height:2.1;color:var(--text2);}
 .shop li span{color:var(--text4);font-size:13.5px;}
 
+/* AUDIO */
+div[data-testid="stAudio"]{margin-top:16px;border-radius:10px;overflow:hidden;border:1px solid var(--border);}
+
 .footer{text-align:center;color:var(--text4);font-size:13px;margin-top:80px;line-height:1.7;padding-bottom:30px;border-top:1px solid var(--border);padding-top:30px;}
 @media(max-width:640px){.card{padding:24px;}}
 </style>
 """
 
-st.set_page_config(page_title="FridgeSnap", layout="centered")
+st.set_page_config(page_title="FridgeSnap (LangChain)", layout="centered")
 st.markdown(_CSS, unsafe_allow_html=True)
 st.markdown('''<div class="nav"><div class="nav-inner">
   <div class="logo">
     <div class="logo-icon">🥑</div>
-    <div class="logo-text">Fridge<span>Snap</span></div>
+    <div class="logo-text">Fridge<span>Snap</span> 🤖</div>
   </div>
 </div></div>''', unsafe_allow_html=True)
 
@@ -262,9 +259,9 @@ st.markdown('<div class="stepper">' + "".join(
     f'<div class="step {"on" if i + 1 == stage else ("done" if i + 1 < stage else "")}">{s}</div>'
     for i, s in enumerate(steps)) + "</div>", unsafe_allow_html=True)
 
-st.markdown('<div class="hero"><h1>Snap your fridge.<br>Cook what\'s inside.</h1>'
+st.markdown('<div class="hero"><h1>LangChain Chef Agent<br>Cook what\'s inside.</h1>'
             '<p class="sub">Show me what you\'ve got — I\'ll spot the ingredients, you pick a cuisine, '
-            'and I\'ll build three recipes around <b>your</b> food. Nothing wasted.</p></div>',
+            'and my LangChain brain will build three recipes around <b>your</b> food.</p></div>',
             unsafe_allow_html=True)
 
 # ---------- 1. photo ----------
@@ -291,7 +288,7 @@ if st.session_state.photo:
     c1, c2 = st.columns(2)
     with c1:
         if st.button("🔍 Identify ingredients", use_container_width=True):
-            with st.spinner("Peeking inside your fridge…"):
+            with st.spinner("Agent is analyzing your fridge…"):
                 raw, mime = st.session_state.photo
                 small, mime2 = prep_image(raw, mime)
                 items, err = detect_ingredients(small, mime2)
@@ -343,7 +340,7 @@ if st.session_state.detected:
 
     # ---------- 3. options ----------
     st.markdown('<div class="card"><div class="k">Step 3</div><h3>How do you want it?</h3>'
-                '<p class="sub">Dial it in — then hit the black button to cook.</p></div>', unsafe_allow_html=True)
+                '<p class="sub">Dial it in — then let the LangChain Agent cook.</p></div>', unsafe_allow_html=True)
     
     cuisine = st.pills("Cuisine", CUISINES, default="Anything") or "Anything"
     diet = st.pills("Diet", DIETS, default="No restriction") or "No restriction"
@@ -358,9 +355,9 @@ if st.session_state.detected:
     kcal_target = st.slider("kcal target", 200, 1200, 500, step=50, format="%d kcal", label_visibility="collapsed") if use_kcal else 0
 
     if st.button("🍳 Get my recipes", type="primary", use_container_width=True, disabled=not st.session_state.confirmed):
-        with st.spinner("Cooking up three recipes…"):
+        with st.spinner("LangChain Agent is cooking up three recipes…"):
             try:
-                st.session_state.recipes = generate_recipes(st.session_state.confirmed, cuisine, diet, max_time, servings, kcal_target)
+                st.session_state.recipes = generate_recipes_langchain(st.session_state.confirmed, cuisine, diet, max_time, servings, kcal_target)
             except Exception as e:
                 st.error(f"Couldn't generate recipes: {html.escape(str(e))[:250]}")
                 st.session_state.recipes = None
@@ -370,7 +367,7 @@ if st.session_state.detected:
 if st.session_state.recipes:
     total_have = max(len(st.session_state.confirmed), 1)
     all_missing = {}
-    for r in st.session_state.recipes:
+    for idx, r in enumerate(st.session_state.recipes):
         uses = r.get("uses", []) or []
         pct = round(100 * len(uses) / total_have)
         st.markdown(f"""<div class="card">
@@ -394,10 +391,19 @@ if st.session_state.recipes:
         st.markdown(f'<ol class="steps">{steps_html}</ol>', unsafe_allow_html=True)
         if r.get("tip"):
             st.markdown(f'<div class="tip">💡 {html.escape(str(r["tip"]))}</div>', unsafe_allow_html=True)
+        
+        # Audio feature
+        if st.button(f"🔊 Hear Recipe {idx+1}", key=f"btn_audio_{idx}"):
+            with st.spinner("Generating audio..."):
+                generate_audio(idx, r.get('title', ''), r.get('steps', []))
+                
+        if f"audio_{idx}" in st.session_state:
+            st.audio(st.session_state[f"audio_{idx}"], format="audio/mp3")
+
         st.markdown("</div>", unsafe_allow_html=True)
 
     if all_missing:
         lis = "".join(f"<li>{html.escape(k)}" + (f" <span>— or use {html.escape(v)}</span>" if v else "") + "</li>" for k, v in all_missing.items())
         st.markdown(f'<div class="shop"><h3>🛒 Shopping list</h3><p class="sub">Everything missing, across all three recipes.</p><ul>{lis}</ul></div>', unsafe_allow_html=True)
 
-st.markdown('<div class="footer">FridgeSnap — snap it, cook it.<br>Calorie estimates are rough guides, not medical advice.</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">FridgeSnap LangChain Agent — snap it, cook it.<br>Calorie estimates are rough guides, not medical advice.</div>', unsafe_allow_html=True)
