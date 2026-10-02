@@ -31,10 +31,15 @@ VOICE = "en-US-AndrewMultilingualNeural"
 VOICE_FALLBACK = "en-US-RogerNeural"
 
 def _clean_spoken(text):
-    """Strip URLs/links so the voiceover never reads 'https colon slash slash' aloud."""
+    """Strip URLs/links/domains so the voiceover never reads 'https colon slash slash' aloud."""
     t = re.sub(r"\[([^\]]+)\]\(\s*https?://\S+\s*\)", r"\1", text or "")
     t = re.sub(r"https?://\S+", "", t)
     t = re.sub(r"\bwww\.\S+", "", t)
+    # bare domains the model sometimes writes: github.com/owner/repo, mysite.io
+    t = re.sub(r"\b(?:[a-zA-Z0-9-]+\.)+(?:com|io|dev|app|net|org|ai|co|me|site|page|link|gg|ly|to|so|xyz|tech)\b\S*", "", t)
+    # stray fragments left behind: "www.", or a lone "http"/"https"
+    t = re.sub(r"\bwww\.(?=\s|$)", "", t)
+    t = re.sub(r"\bhttps?\b", "", t)
     return re.sub(r"\s+", " ", t).strip()
 
 def _to_ssml(text, voice):
@@ -231,17 +236,30 @@ Output ONLY a valid JSON object matching this exact schema:
 RULES: Only state what the context supports. Be concrete: name real commands, file types, behaviors from the code — never generic filler."""
     brief = do_call(prompt, max_tokens=1500, temperature=0.2)
     # Focused second pass — the main brief often drops these fields, so ask directly.
+    # The small model sometimes returns empty arrays; don't accept that silently —
+    # push back firmly, and only flag failure if it still refuses after retries.
     try:
-        review = do_call(
+        review_prompt = (
             "You are a blunt senior engineer reviewing an open-source project. Context:\n"
             + json.dumps(brief, indent=1)[:4000] +
             "\nReturn ONLY valid JSON: {\"strengths\": [\"3-4 concrete strengths grounded in the context\"], "
             "\"weaknesses\": [\"3-4 honest weaknesses, limitations, or missing pieces visible from the context\"]}. "
             "Be specific and technical — e.g. 'has zero tests', 'README lacks a usage example', "
-            "'setup needs 5 manual steps'. Never vague filler like 'could be more popular'.",
-            max_tokens=600, temperature=0.3)
+            "'setup needs 5 manual steps'. Never vague filler like 'could be more popular'. "
+            "Empty arrays are not acceptable — every real codebase has both strengths and weaknesses.")
+        review = {}
+        nudge = ("\nYour last response had empty strengths/weaknesses. Look again at the file tree, "
+                 "README and code patterns in the context above and name specifics. "
+                 "Respond with the full JSON, no empty arrays.")
+        for attempt in range(3):
+            review = do_call(review_prompt + ("" if attempt == 0 else nudge),
+                             max_tokens=600, temperature=0.3)
+            if review.get("strengths") or review.get("weaknesses"):
+                break
         brief["strengths"] = [str(s) for s in review.get("strengths", [])][:4]
         brief["weaknesses"] = [str(s) for s in review.get("weaknesses", [])][:4]
+        if not brief["strengths"] and not brief["weaknesses"]:
+            brief["_review_failed"] = True
     except Exception:
         brief["_review_failed"] = True
     return {"concept_brief": brief}
@@ -256,7 +274,7 @@ RULES:
 - Concrete nouns only. BANNED: revolutionary, game-changing, cutting-edge, unlock, supercharge, seamless.
 - HOOKS name a painful problem or open a curiosity loop. Max 8 words.
 - Short SCRIPTS are SPOKEN WORD: contractions, short sentences, 25-35 words, end with a call to action.
-- SCRIPTS must never contain URLs, links, or the word "https" — say "link below" instead.
+- SCRIPTS must never contain URLs, links, domains (not even "github.com/owner/repo"), or the words "https"/"www" — say "link in bio" or "link below" instead.
 - IMAGE PROMPTS are self-contained prompts for a square 1:1 social promo graphic depicting THIS project's actual subject matter (never generic laptops/robots/tech wallpaper). MUST include the exact on-image headline in "quotes" (max 5 words), describe scene, composition, style, lighting, colors, and end with: "No watermark, no extra text, no garbled letters."
 Output ONLY a valid JSON object matching this exact schema:
 {{"pitch_cards": [{{"headline": "punchy benefit, max 6 words", "sub": "one concrete sentence with a real feature or proof point"}}, {{"headline": "...", "sub": "..."}}, {{"headline": "...", "sub": "..."}}],
