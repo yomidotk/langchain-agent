@@ -436,7 +436,7 @@ elif stage == 2:
     st.markdown('<div class="hero"><div class="hero-eyebrow">Step 2 of 4</div><h1>Confirm your <em>ingredients.</em></h1><p>Toggle anything wrong off, then set your preferences before we cook.</p></div>', unsafe_allow_html=True)
 
     # Ingredients
-    st.markdown('<div class="card"><div class="card-kicker">Detected</div><div class="card-title">🥬 What's in your fridge</div><div class="card-sub">Tap to deselect. Green = confident, orange = unsure.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card"><div class="card-kicker">Detected</div><div class="card-title">&#x1F96C; What\'s in your fridge</div><div class="card-sub">Tap to deselect. Green = confident, orange = unsure.</div>', unsafe_allow_html=True)
     pill_labels   = [f"{it['name']} ({it['amount']})" if it.get("amount") else it["name"] for it in st.session_state.detected]
     default_pills = [lbl for lbl, it in zip(pill_labels, st.session_state.detected) if it["name"] in st.session_state.confirmed]
     st.pills("Ingredients", pill_labels, selection_mode="multi", default=default_pills, key="pill_sel", on_change=sync_pills, label_visibility="collapsed")
