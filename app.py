@@ -253,18 +253,52 @@ def mermaid_image_url(code):
     b64 = base64.urlsafe_b64encode(code.encode("utf-8")).decode()
     return f"https://mermaid.ink/img/{b64}?theme=neutral"
 
-def fetch_diagram(code):
-    """Returns (png_bytes, error_str). Falls back gracefully; caller shows steps instead."""
-    code = re.sub(r'```(?:mermaid)?', '', code or "").strip()
-    if "flowchart" not in code and "graph" not in code:
-        return None, "model did not return flowchart code"
+def _sanitize_mermaid(code):
+    """Mermaid chokes on fancy unicode and &<>"() in labels — normalize to safe ASCII."""
+    t = (code or "")
+    for a, b in [("‑", "-"), ("–", "-"), ("—", "-"), (""", '"'), (""", '"'),
+                 ("'", "'"), ("'", "'"), ("…", "..."), ("\u00a0", " ")]:
+        t = t.replace(a, b)
+    t = re.sub(r'[&<>"]', "", t)
+    t = re.sub(r"[()]", "", t)
+    return t.strip()
+
+def _simple_mermaid(steps):
+    """Minimal ASCII-only fallback diagram built from step titles — almost always renders."""
+    nodes = []
+    for i, s in enumerate((steps or [])[:6]):
+        label = re.sub(r"\[[^\]]+\]", "", str(s))  # drop [file.ts] citations
+        label = re.sub(r"[^A-Za-z0-9 :/-]", "", label).strip()[:30] or f"Step {i+1}"
+        nodes.append(f"    N{i}[{label}]")
+    if not nodes:
+        return ""
+    edges = "\n".join(f"    N{i} --> N{i+1}" for i in range(len(nodes) - 1))
+    return "flowchart TD\n" + "\n".join(nodes) + ("\n" + edges if edges else "")
+
+def _render_mermaid(code):
     try:
         r = requests.get(mermaid_image_url(code), timeout=30)
         if r.status_code == 200 and r.content[:4] == b"\x89PNG":
-            return r.content, ""
-        return None, f"render HTTP {r.status_code}"
-    except Exception as e:
-        return None, f"render failed: {str(e)[:120]}"
+            return r.content
+    except Exception:
+        pass
+    return None
+
+def fetch_diagram(code, steps=None):
+    """Returns (png_bytes, error_str). Sanitizes, retries with a minimal diagram,
+    then falls back gracefully (caller shows the steps instead)."""
+    code = _sanitize_mermaid(re.sub(r'```(?:mermaid)?', '', code or ""))
+    if "flowchart" not in code and "graph" not in code:
+        code = ""
+    img = _render_mermaid(code) if code else None
+    if img:
+        return img, ""
+    # second chance: minimal ASCII diagram from the step titles
+    simple = _simple_mermaid(steps)
+    img = _render_mermaid(simple) if simple else None
+    if img:
+        return img, ""
+    return None, "diagram service couldn't render it"
 
 # ================= GITHUB =================
 CODE_EXTS = (".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".rb", ".php", ".swift", ".kt")
@@ -514,13 +548,21 @@ Write for the EAR, not the eye:
 
 Return STRICT JSON: {{"script": "..."}}
 {STRICT_JSON}"""
-    out = do_call(prompt, max_tokens=900, temperature=0.5, label="Writing the voiceover")
-    script = _clean_spoken(out.get("script", ""))
-    # hard gate: no URLs/domains may survive into the script
-    if re.search(r"https?://|\bwww\.|\b(?:[a-zA-Z0-9-]+\.)+(?:com|io|dev|app|net|org)\b", script):
-        out = do_call(prompt + "\nYour last script contained a URL or domain name. Rewrite with zero URLs, zero domains.",
-                      max_tokens=900, temperature=0.5, label="Writing the voiceover")
-        script = _clean_spoken(out.get("script", ""))
+    script = ""
+    for attempt in range(3):
+        p = (prompt if attempt == 0
+             else prompt + "\nYour last script was empty or invalid. Write the full 130-160 word spoken script now.")
+        out = do_call(p, max_tokens=900, temperature=0.5, label="Writing the voiceover")
+        script = _clean_spoken(str(out.get("script", "")))
+        # hard gates: no URLs/domains may survive, and it must actually say something
+        if re.search(r"https?://|\bwww\.|\b(?:[a-zA-Z0-9-]+\.)+(?:com|io|dev|app|net|org)\b", script):
+            script = ""
+            continue
+        if len(script.split()) >= 30:
+            break
+        script = ""
+    if not script:
+        raise RuntimeError("the AI returned an empty voiceover script after retries")
     return script
 
 def hook_image_prompt(hook, visual_hint):
@@ -684,7 +726,7 @@ if go:
     if failed is None:
         try:
             mermaid = make_diagram(brief)
-            d_bytes, d_err = fetch_diagram(mermaid)
+            d_bytes, d_err = fetch_diagram(mermaid, brief.get("how_it_works", []))
             if d_err:
                 warnings.append(f"Diagram render: {d_err}")
         except Exception as e:
