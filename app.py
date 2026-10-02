@@ -1,35 +1,27 @@
-"""HypeRepo — fresh rewrite (2026-10-02).
-Paste a GitHub URL, get:
-  1. The short version (TL;DR)
-  2. A how-it-works diagram (Mermaid flowchart, rendered as a clean image)
-  3. A plain-English explanation of the repo
-  4. An audio explainer with its script shown separately
-  5. 4 Instagram hook images (text-based, B&W) + captions + hashtags
-Prompting follows a research-backed playbook: strict JSON blocks, grounded roles,
-concreteness rules, pre-assigned non-overlapping angles, one rubric-scored critique pass.
+"""FridgeSnap — snap your fridge, get recipes.
+Upload (or photograph) your fridge -> AI lists what's inside -> pick cuisine,
+calorie target, diet, time -> 3 recipes built from YOUR ingredients, with a
+combined shopping list for what's missing.
 """
-import os
 import re
 import json
 import html
 import time
-import asyncio
 import base64
+import io
 
 import requests
-import edge_tts
 import streamlit as st
 
 # ================= CONFIG =================
 DO_API_KEY = st.secrets.get("DO_API_KEY", "")
 ALIBABA_API_KEY = st.secrets.get("ALIBABA_API_KEY", "")
-GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", "")  # optional: raises GitHub API quota 60 -> 5000/hr
+DO_URL = "https://inference.do-ai.run/v1/chat/completions"
 DO_MODEL = "openai-gpt-oss-20b"
-QWEN_URL = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
-QWEN_MODEL = "qwen-image-max"
-
-VOICE = "en-US-AndrewMultilingualNeural"
-VOICE_FALLBACK = "en-US-RogerNeural"
+# Vision: DashScope OpenAI-compatible endpoint (Alibaba key). qwen-vl-max is strong
+# at reading fridge photos. Alternatives: qwen-vl-plus, qwen2.5-vl-72b-instruct.
+VISION_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
+VISION_MODEL = "qwen-vl-max"
 
 STRICT_JSON = """
 OUTPUT RULES (follow exactly):
@@ -38,858 +30,330 @@ OUTPUT RULES (follow exactly):
 - Include every required field. If a field is truly unknown, use "" or [] — never invent a value.
 - Your response must start with { and end with }."""
 
-REJECT_WORDS = ("revolutionary", "game-changing", "game changing", "cutting-edge",
-                "cutting edge", "seamless", "powerful", "unlock", "elevate",
-                "delve", "tapestry", "furthermore")
+CUISINES = ["Anything", "Italian", "Mexican", "Middle Eastern", "Asian", "Indian",
+            "Mediterranean", "French", "American"]
+DIETS = ["No restriction", "Vegetarian", "Vegan", "Halal", "Gluten-free", "High-protein"]
 
-# ================= LLM =================
-DO_CHAT_URL = "https://inference.do-ai.run/v1/chat/completions"
-DO_RESP_URL = "https://inference.do-ai.run/v1/responses"  # fallback if chat endpoint rejects us
-
-def _post(url, payload):
-    r = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {DO_API_KEY}", "Content-Type": "application/json"},
-        json=payload, timeout=180)
-    r.raise_for_status()
-    return r.json()
-
-def do_call(prompt, max_tokens, temperature, label="AI step", _tries=3):
-    """Call the LLM and return parsed JSON.
-
-    The real fix (not a retry curtain): the primary path uses the chat-completions
-    endpoint with response_format={"type": "json_object"} — constrained decoding,
-    so the model cannot return prose, markdown, or empty output. If that endpoint
-    rejects the request (400/404/422), we fall back to /v1/responses automatically.
-    The few retries that remain are only a safety net for network hiccups and
-    truncated responses (which get more tokens on retry)."""
-    original = prompt
-    last_err = None
-    raw_preview = ""
-    use_chat = True
-    for attempt in range(_tries):
-        tok = int(max_tokens * (1.6 ** attempt))
-        t = temperature if attempt == 0 else 0.0
-        if attempt > 0:
-            time.sleep(min(2 * attempt, 8))
-        res_data = None
-        if use_chat:
-            try:
-                res_data = _post(DO_CHAT_URL, {
-                    "model": DO_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": tok, "temperature": t,
-                    "response_format": {"type": "json_object"}, "stream": False})
-            except requests.HTTPError as e:
-                code = e.response.status_code if e.response is not None else 0
-                if code in (400, 404, 422):
-                    use_chat = False  # JSON mode unsupported here; fall back below
-                else:
-                    last_err = e
-                    continue
-            except (requests.RequestException, ValueError) as e:
-                last_err = e
-                continue
-        if res_data is None:
-            try:
-                res_data = _post(DO_RESP_URL, {
-                    "model": DO_MODEL, "input": prompt, "max_output_tokens": tok,
-                    "temperature": t, "stream": False})
-            except (requests.RequestException, ValueError) as e:
-                last_err = e
-                continue
-        if not isinstance(res_data, dict):
-            last_err = ValueError(f"unexpected API response shape: {type(res_data).__name__}")
-            continue
-        raw_content = ""
-        if "choices" in res_data and len(res_data["choices"]) > 0:
-            msg = res_data["choices"][0].get("message") or {}
-            raw_content = msg.get("content", "") or ""
-        else:
-            raw_content = res_data.get("output", "") or res_data.get("text", "")
-        if isinstance(raw_content, list):
-            for block in raw_content:
-                if isinstance(block, dict) and block.get("role") == "assistant":
-                    sub = block.get("content", [])
-                    if isinstance(sub, list) and len(sub) > 0:
-                        raw_content = sub[0].get("text", "")
-        if not isinstance(raw_content, str):
-            raw_content = json.dumps(raw_content)
-        raw_preview = raw_content[:200]
-        clean_text = re.sub(r'```(?:json)?', '', raw_content).strip()
-        match = re.search(r'\{.*\}', clean_text, re.DOTALL)
-        final_json = match.group(0) if match else clean_text
-        try:
-            if not final_json.strip():
-                raise ValueError("empty model output")
-            parsed = json.loads(final_json)
-            if not isinstance(parsed, dict):
-                raise ValueError(f"model returned JSON {type(parsed).__name__}, not an object")
-            return parsed
-        except (json.JSONDecodeError, ValueError) as e:
-            last_err = e
-            if final_json.strip():
-                prompt = ("Your previous response was cut off. "
-                          "Return the COMPLETE object again as valid JSON only, every field, full text, "
-                          "no truncation, no markdown fences.\n\nBroken output:\n" + final_json[:6000])
-            else:
-                prompt = ("Your last response was empty. Output ONLY the complete JSON object now, "
-                          "no other text, no explanations.\n\nTask:\n" + original[:8000])
-    raise RuntimeError(f"{label} failed after {_tries} tries ({last_err}). "
-                       f"Last model output: {raw_preview[:150]!r}")
-
-# ================= SPEECH =================
-def _clean_spoken(text):
-    """Strip URLs/links/domains so the voiceover never reads them aloud."""
-    t = re.sub(r"\[([^\]]+)\]\(\s*https?://\S+\s*\)", r"\1", text or "")
-    t = re.sub(r"https?://\S+", "", t)
-    t = re.sub(r"\bwww\.\S+", "", t)
-    t = re.sub(r"\b(?:[a-zA-Z0-9-]+\.)+(?:com|io|dev|app|net|org|ai|co|me|site|page|link|gg|ly|to|so|xyz|tech)\b\S*", "", t)
-    t = re.sub(r"\bwww\.(?=\s|$)", "", t)
-    t = re.sub(r"\bhttps?\b", "", t)
-    return re.sub(r"\s+", " ", t).strip()
-
-def _to_ssml(text, voice):
-    """Light SSML: pause after the hook + breathing room between paragraphs."""
-    text = _clean_spoken(text)
-    paras = [html.escape(" ".join(p.split())) for p in text.split("\n\n") if p.strip()]
-    if not paras:
-        paras = [html.escape(" ".join(text.split()))]
-    body = '<break time="600ms"/>'.join(paras)
-    first_end = body.find(". ")
-    if first_end != -1:
-        body = body[:first_end + 1] + '<break time="450ms"/>' + body[first_end + 1:]
-    return f'<speak version="1.0" xml:lang="en-US"><voice name="{voice}"><prosody rate="+0%">{body}</prosody></voice></speak>'
-
-def _tts_bytes(ssml_text, voice):
-    async def _run():
-        # NOTE: edge_tts has no `ssml=` kwarg — the SSML string goes in as `text`
-        # (the service sniffs the <speak> tag). Passing ssml= raises TypeError.
-        communicate = edge_tts.Communicate(ssml_text, voice)
-        chunks = []
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                chunks.append(chunk["data"])
-        return b"".join(chunks)
+# ================= IMAGE PREP =================
+def prep_image(file_bytes, mime):
+    """Downscale to max 1024px JPEG so the vision call is fast and cheap."""
     try:
-        return asyncio.run(_run())
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(_run())
-        finally:
-            loop.close()
+        from PIL import Image
+        img = Image.open(io.BytesIO(file_bytes))
+        img.thumbnail((1024, 1024))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, "JPEG", quality=85)
+        return buf.getvalue(), "image/jpeg"
+    except Exception:
+        return file_bytes, mime or "image/jpeg"
 
-def make_audio(script):
-    """Returns (mp3_bytes, error_str). Never raises."""
-    script = _clean_spoken(script)
-    if not script:
-        return None, "empty script"
-    last_err = ""
-    for voice in (VOICE, VOICE_FALLBACK):
-        try:
-            data = _tts_bytes(_to_ssml(script, voice), voice)
-            if data:
-                return data, ""
-            last_err = f"{voice}: empty audio"
-        except Exception as e:
-            last_err = f"{voice}: {str(e)[:120]}"
-    return None, last_err or "TTS failed"
+# ================= VISION (what's in the fridge?) =================
+def detect_ingredients(img_bytes, mime):
+    """Returns (ingredients_list, error_str). ingredients: [{name, amount, confidence}]."""
+    b64 = base64.b64encode(img_bytes).decode()
+    prompt = """You are a precise kitchen assistant. Look at this fridge/kitchen photo and list every identifiable food ingredient or item you can see.
 
-# ================= IMAGES (Alibaba Qwen only) =================
-def qwen_image(prompt):
-    """Returns (png_bytes, error_str). Qwen only, no fallbacks. Never raises."""
+Return STRICT JSON: {"ingredients": [{"name": "eggs", "amount": "about 6", "confidence": "high"}, {"name": "milk", "amount": "half bottle", "confidence": "medium"}]}
+
+Rules:
+- Only list what you can actually SEE. Never guess what's behind closed doors or in opaque containers.
+- Names in plain English, singular-ish ("chicken breast", not "chx brst").
+- amount: short visible estimate ("3", "a bunch", "half jar"). Use "" if unclear.
+- confidence: high/medium/low.
+- Merge obvious duplicates (two milk bottles -> one entry "2 bottles").
+- If this is not a fridge/kitchen/food photo at all, return {"ingredients": [], "not_food": true}.
+""" + STRICT_JSON
     try:
-        resp = requests.post(
-            QWEN_URL,
+        r = requests.post(
+            VISION_URL,
             headers={"Authorization": f"Bearer {ALIBABA_API_KEY}", "Content-Type": "application/json"},
-            json={"model": QWEN_MODEL,
-                  "input": {"messages": [{"role": "user",
-                                           "content": [{"text": prompt}]}]},
-                  "parameters": {"size": "1328*1328", "n": 1}},
-            timeout=180)
+            json={"model": VISION_MODEL,
+                  "messages": [{"role": "user", "content": [
+                      {"type": "text", "text": prompt},
+                      {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}]}],
+                  "temperature": 0.1},
+            timeout=120)
     except Exception as e:
-        return None, f"request failed: {str(e)[:150]}"
-    if resp.status_code != 200:
-        return None, f"HTTP {resp.status_code}: {resp.text[:200]}"
+        return None, f"vision request failed: {str(e)[:150]}"
+    if r.status_code != 200:
+        return None, f"vision HTTP {r.status_code}: {r.text[:200]}"
     try:
-        data = resp.json()
-    except Exception:
-        return None, "non-JSON response"
-    out = (data.get("output") or {})
-    img_url = ""
-    # shape 1 (observed live): output.choices[0].message.content[].image
-    for ch in out.get("choices", []) or []:
-        msg = (ch.get("message") or {})
-        for item in msg.get("content", []) or []:
-            if isinstance(item, dict) and item.get("image"):
-                img_url = item["image"]
-                break
-        if img_url:
-            break
-    # shape 2 (documented): output.results[0].url
-    if not img_url:
-        results = out.get("results") or []
-        if results:
-            img_url = results[0].get("url", "")
-    if not img_url:
-        return None, f"no image in response: {json.dumps(data)[:200]}"
-    url = img_url
-    if url.startswith("data:"):
-        try:
-            return base64.b64decode(url.split(",", 1)[1]), ""
-        except Exception as e:
-            return None, f"bad data URL: {str(e)[:100]}"
-    if url.startswith("http"):
-        try:
-            r = requests.get(url, timeout=60)
-            if r.status_code == 200 and r.content:
-                return r.content, ""
-            return None, f"download HTTP {r.status_code}"
-        except Exception as e:
-            return None, f"download failed: {str(e)[:120]}"
-    return None, f"unexpected image value: {url[:120]}"
-
-# ================= DIAGRAM (Mermaid -> image) =================
-def mermaid_image_url(code):
-    b64 = base64.urlsafe_b64encode(code.encode("utf-8")).decode()
-    return f"https://mermaid.ink/img/{b64}?theme=neutral"
-
-def _sanitize_mermaid(code):
-    """Mermaid chokes on fancy unicode and &<>"() in labels — normalize to safe ASCII."""
-    t = (code or "")
-    for a, b in [("‑", "-"), ("–", "-"), ("—", "-"), (""", '"'), (""", '"'),
-                 ("'", "'"), ("'", "'"), ("…", "..."), ("\u00a0", " ")]:
-        t = t.replace(a, b)
-    t = re.sub(r'[&<>"]', "", t)
-    t = re.sub(r"[()]", "", t)
-    return t.strip()
-
-def _render_mermaid(code):
+        data = r.json()
+        content = data["choices"][0]["message"]["content"] or ""
+    except Exception as e:
+        return None, f"bad vision response: {str(e)[:120]}"
+    clean = re.sub(r'```(?:json)?', '', content).strip()
+    m = re.search(r'\{.*\}', clean, re.DOTALL)
     try:
-        r = requests.get(mermaid_image_url(code), timeout=30)
-        if r.status_code == 200 and r.content[:4] == b"\x89PNG":
-            return r.content
+        out = json.loads(m.group(0) if m else clean)
     except Exception:
-        pass
-    return None
-
-def fetch_diagram(code):
-    """Returns (png_bytes, error_str). The code is built deterministically in Python;
-    just sanitize and render it. Caller shows the steps instead on failure."""
-    code = _sanitize_mermaid(re.sub(r'```(?:mermaid)?', '', code or ""))
-    if "flowchart" not in code:
-        return None, "no diagram code"
-    img = _render_mermaid(code)
-    return (img, "") if img else (None, "diagram service couldn't render it")
-
-# ================= GITHUB =================
-CODE_EXTS = (".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".rb", ".php", ".swift", ".kt")
-SKIP_PARTS = ("node_modules", ".git/", "dist/", "build/", "__pycache__", ".next/",
-              "vendor/", ".idea/", ".vscode/", ".min.js", ".min.css", ".d.ts", ".pyi",
-              "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock")
-JUNK_FILES = ("package-lock.json", "yarn.lock")
-
-def _gh_headers():
-    h = {"Accept": "application/vnd.github+json"}
-    if GITHUB_TOKEN:
-        h["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-    return h
-
-def _gh_api(url, want_json=True):
-    """api.github.com GET with retries. Returns (True, data) on success, (False, err)
-    after retries. Raises immediately with a clear, actionable message on rate limiting."""
-    last_err = None
-    for attempt in range(3):
-        try:
-            r = requests.get(url, timeout=25, headers=_gh_headers())
-        except requests.RequestException as e:
-            last_err = e
-        else:
-            if r.status_code == 200:
-                try:
-                    return True, (r.json() if want_json else r.text)
-                except ValueError as e:
-                    last_err = e
-            elif r.status_code == 403 and "rate limit" in r.text.lower():
-                raise RuntimeError(
-                    "GitHub API rate limit hit — Streamlit Cloud shares outbound IPs, so the "
-                    "60-requests/hour unauthenticated quota gets eaten fast. Fix (one minute, free): "
-                    "create a personal access token at github.com → Settings → Developer settings → "
-                    "Personal access tokens (no scopes needed for public repos), then add it to the "
-                    "app's Secrets as GITHUB_TOKEN. That raises the quota to 5,000/hour.")
-            elif r.status_code in (404, 410):
-                return False, None  # normal: repo has no README, odd default branch, etc.
-            else:
-                last_err = RuntimeError(f"GitHub HTTP {r.status_code}: {r.text[:120]}")
-        time.sleep(2 * (attempt + 1))
-    return False, last_err
-
-def _gh_raw(url):
-    """raw.githubusercontent.com GET with retries (no API quota here, just blips)."""
-    for attempt in range(3):
-        try:
-            r = requests.get(url, timeout=25, headers={"Accept": "application/vnd.github.raw"})
-            if r.status_code == 200:
-                return r.text
-        except requests.RequestException:
-            pass
-        time.sleep(2 * (attempt + 1))
-    return ""
-
-def _gh_json(url):
-    ok, data = _gh_api(url, want_json=True)
-    return data if ok else None
-
-def _gh_text(url):
-    if "raw.githubusercontent.com" in url:
-        return _gh_raw(url)
-    ok, data = _gh_api(url, want_json=False)
-    return data if ok else ""
-
-def fetch_repo(repo_url):
-    """Returns dict with labeled context sections. Raises RuntimeError on failure."""
-    m = re.search(r"github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+)", repo_url or "")
-    if not m:
-        raise RuntimeError("not a valid GitHub repo URL")
-    owner, repo = m.group(1), m.group(2).removesuffix(".git")
-    base = f"https://api.github.com/repos/{owner}/{repo}"
-
-    meta = _gh_json(base) or {}
-    default_branch = meta.get("default_branch", "main")
-
-    readme = ""
-    rd = _gh_json(f"{base}/readme")
-    if rd and rd.get("content"):
-        try:
-            readme = base64.b64decode(rd["content"]).decode("utf-8", "replace")
-        except Exception:
-            readme = ""
-
-    tree = _gh_json(f"{base}/git/trees/{default_branch}?recursive=1") or {}
-    paths = [t["path"] for t in tree.get("tree", [])
-             if t.get("type") == "blob"
-             and not any(p in t["path"] for p in SKIP_PARTS)
-             and os.path.basename(t["path"]) not in JUNK_FILES]
-    paths = paths[:80]
-
-    pkg = ""
-    if "package.json" in paths:
-        pkg = _gh_text(f"https://raw.githubusercontent.com/{owner}/{repo}/{default_branch}/package.json")[:1500]
-
-    # central source files: entry-ish, non-config code
-    code_files = [p for p in paths if p.endswith(CODE_EXTS)
-                  and not any(j in p for j in (".config.", "config."))]
-    code_files.sort(key=lambda p: (p.count("/"), len(p)))
-    excerpts = []
-    for p in code_files[:4]:
-        txt = _gh_text(f"https://raw.githubusercontent.com/{owner}/{repo}/{default_branch}/{p}")
-        if txt.strip():
-            excerpts.append(f"--- {p} ---\n{txt[:2500]}")
-
-    context = (
-        f"<repo>{owner}/{repo} — {meta.get('description') or ''} "
-        f"(language: {meta.get('language') or '?'}, stars: {meta.get('stargazers_count', 0)})</repo>\n"
-        f"<readme>\n{readme[:5000]}\n</readme>\n"
-        f"<file_tree>\n" + "\n".join(paths[:60]) + "\n</file_tree>\n"
-        f"<package_json>\n{pkg}\n</package_json>\n"
-        f"<code>\n" + "\n\n".join(excerpts)[:6000] + "\n</code>"
-    )
-    stats = {"readme_chars": len(readme), "files": len(paths), "excerpts": len(excerpts)}
-    # Never generate marketing from thin air: if GitHub gave us nothing usable,
-    # fail loudly instead of letting the model hallucinate a different project.
-    if not readme.strip() and not paths:
-        raise RuntimeError(
-            "GitHub returned no README and no file list for this repo "
-            "(API rate-limited, repo private/renamed, or network hiccup). "
-            "Tip: add a free GITHUB_TOKEN (no scopes needed) to the app's Secrets "
-            "to raise the GitHub API quota from 60 to 5000 requests/hour.")
-    return {"owner": owner, "repo": repo, "meta": meta, "context": context, "stats": stats}
-
-# ================= LLM CALLS =================
-def _field_empty(v):
-    if isinstance(v, list):
-        return not [x for x in v if str(x).strip()]
-    return not str(v or "").strip()
-
-def _reliable_json(prompt, fields, max_tokens, label):
-    """One focused JSON call with validation: re-asks for exactly the missing
-    fields (max 2), then raises loudly instead of returning a partial object
-    that would poison downstream steps."""
-    b = do_call(prompt, max_tokens, 0.1, label=label)
-    for _ in range(2):
-        missing = [f for f in fields if _field_empty(b.get(f))] if isinstance(b, dict) else fields
-        banned = [w for w in REJECT_WORDS if w in json.dumps(b).lower()] if isinstance(b, dict) else []
-        if not missing and not banned:
-            return b
-        bits = []
-        if missing:
-            bits.append("these fields were empty or missing: " + ", ".join(missing)
-                        + " — fill every one from the repo context, no exceptions")
-        if banned:
-            bits.append("you used banned generic-marketing words (" + ", ".join(banned)
-                        + ") — rewrite avoiding them completely")
-        b = do_call(prompt + "\nYour last response had problems: " + "; ".join(bits)
-                    + ". Return the full corrected JSON.",
-                    max_tokens, 0.1, label=label)
-    missing = [f for f in fields if _field_empty(b.get(f))] if isinstance(b, dict) else fields
-    if missing:
-        raise RuntimeError(f"the AI left these fields empty after retries: {', '.join(missing)}")
-    return b
-
-def comprehend(ctx):
-    """Two small focused calls (reliable on a 20B model) merged into one brief."""
-    p1 = f"""You are a senior engineer who has read this exact codebase. Base everything ONLY on the repo context below. If the context doesn't support a claim, write "not clear from context" instead of inventing.
-
-RULE: Every claim must name something real from the repo context: a file path, a command, a config key, a function name, or a README section. A sentence with no concrete reference is a failed sentence — rewrite it.
-
-REJECTED — never write these words/phrases: {", ".join(REJECT_WORDS)}. Never write a sentence that would still be true if you swapped in a different repo's name.
-
-Repo context:
-{ctx}
-
-Return STRICT JSON with exactly these fields:
-{{
-  "explainer": "120-180 words. Explain this repo to a smart friend who doesn't code. No jargon; if you must use a technical term, define it in the same sentence.",
-  "short_text": "2-3 sentences COMPRESSED FROM your explainer above — same facts, shorter. Never empty when the explainer exists.",
-  "audience": "who this is for, specifically (not 'developers' — which developers, doing what). Derive from the repo context, never leave empty."
-}}
-{STRICT_JSON}"""
-    p2 = f"""You are a senior engineer who has read this exact codebase. Base everything ONLY on the repo context below.
-
-RULE: Every claim must name something real from the repo context: a file path, a command, a config key, a function name, or a README section. A sentence with no concrete reference is a failed sentence — rewrite it.
-
-Repo context:
-{ctx}
-
-Return STRICT JSON with exactly these fields:
-{{
-  "how_it_works": ["4-6 steps, in order, one sentence each. Each step must cite the file(s) it comes from, e.g. [src/render.ts]. Steps must form a chain: the output of step N is the input of step N+1. If a step can't be tied to a file in the context, drop it — do not bridge gaps with guesses."],
-  "proof_points": ["3-5 concrete, verifiable facts from the context: numbers, features, file names, commands. Never empty when the context has code."]
-}}
-{STRICT_JSON}"""
-    b1 = _reliable_json(p1, ["explainer", "short_text", "audience"], 1200, "Understanding the project (1/2)")
-    b2 = _reliable_json(p2, ["how_it_works", "proof_points"], 1200, "Understanding the project (2/2)")
-    return {**b1, **b2}
-
-def build_diagram(steps):
-    """Deterministic flowchart from the validated how_it_works steps. No LLM call —
-    the steps are already good, so building the graph in code can't flake,
-    hallucinate, or echo JSON back at us."""
-    nodes = []
-    for i, s in enumerate((steps or [])[:6]):
-        t = re.sub(r"\[[^\]]+\]", "", str(s))  # strip [file.ts] citations
-        t = re.sub(r"\([^)]*\)", "", t)        # strip (parenthetical asides)
-        label = " ".join(t.strip().split()[:8]).rstrip(".,;:")
-        label = re.sub(r"[^A-Za-z0-9 :/-]", "", label).strip()
-        short, out = label.split(), ""
-        for w in short:
-            if len(out) + len(w) + 1 > 40:
-                break
-            out = (out + " " + w).strip()
-        label = out or f"Step {i+1}"
-        nodes.append(f"    N{i}[{label}]")
-    if not nodes:
-        return ""
-    edges = "\n".join(f"    N{i} --> N{i+1}" for i in range(len(nodes) - 1))
-    return "flowchart TD\n" + "\n".join(nodes) + ("\n" + edges if edges else "")
-
-EXAMPLE_ITEM = ('{"angle": "THE PROBLEM", "hook": "Dinner panic at 7pm again?", '
-                '"visual_hint": "empty fridge glowing in a dark kitchen", '
-                '"caption": "You open the fridge. Nothing makes sense together.\\nChefBot looks at what you actually have and builds dinner around it — no shopping trip.", '
-                '"hashtags": ["#mealprep", "#home cooking", "#foodtech", "#indiehackers"]}')
-
-def make_social(brief):
-    """Call 3 — 4 angle-assigned social items. temp 0.7 for creativity."""
-    ctx = (f"Project: {brief.get('short_text','')}\nAudience: {brief.get('audience','')}\n"
-           f"Proof points: {'; '.join(brief.get('proof_points', []))}")
-    prompt = f"""You are a sharp social-media copywriter who hates generic marketing. Everything must be traceable to this project:
-
-{ctx}
-
-REJECTED — never write these: {", ".join(REJECT_WORDS)}. Never "In today's fast-paced world…", never "Are you tired of…?". Never a sentence that would still be true with a different repo's name.
-
-Write exactly 4 items. Each item owns ONE angle — an item may not reuse another item's angle, vocabulary, or proof point:
-1. THE PROBLEM — the pain this project kills. Hook = the frustration, named concretely.
-2. THE MAGIC MOMENT — the single most impressive thing it does. Hook = the "wait, it does WHAT?" beat.
-3. THE PROOF — a concrete detail: a feature, a number, a file, a workflow step from the context.
-4. THE HUMAN — who this is for and why they'd care. Hook = direct address to that person.
-
-DISTINCTNESS CHECK (do this before outputting): list the 4 hooks side by side. If any two share a noun phrase, a verb, or the same sentence shape, rewrite the weaker one. No hashtag may appear in more than one caption. No hook may share more than 2 content words with another hook.
-
-FORMAT EXAMPLE (fictional repo — imitate the punch, not the content):
-{EXAMPLE_ITEM}
-
-Per item return: "angle", "hook" (5-9 words, curiosity gap, plain words that render cleanly as big poster text), "visual_hint" (5-10 words: the poster's background motif, monochrome-friendly, tied to the project), "caption" (2-4 short lines, human voice, ends with a soft CTA like "link in bio"), "hashtags" (4-6, no repeats across items).
-
-Return STRICT JSON: {{"items": [4 items]}}
-{STRICT_JSON}"""
-    out = do_call(prompt, max_tokens=2800, temperature=0.7, label="Writing the social kit")
-    items = out.get("items", [])
-    return [it for it in items if isinstance(it, dict) and it.get("hook")][:4]
-
-def critique_social(brief, items):
-    """Call 4 — one rubric-scored critique pass. temp 0.2. Worth the extra call."""
+        return None, "vision returned non-JSON"
+    if out.get("not_food"):
+        return None, "that doesn't look like a fridge or kitchen photo — try another one"
+    items = [it for it in out.get("ingredients", []) if isinstance(it, dict) and it.get("name")]
     if not items:
-        return items
-    ctx = f"Project: {brief.get('short_text','')}\nProof: {'; '.join(brief.get('proof_points', []))}"
-    prompt = f"""You are a ruthless social-media editor. Project context: {ctx}
+        return None, "couldn't spot any ingredients — try a clearer, brighter photo"
+    return items, ""
 
-Here are 4 social items as JSON:
-{json.dumps(items, indent=1)}
-
-Score EACH item 1-5 on:
-(a) the hook stops the scroll,
-(b) zero overlap with the other 3 items (angle, words, proof point),
-(c) every claim traceable to the project context,
-(d) sounds human, not AI.
-For any item scoring below 4 on any axis, rewrite ONLY that item (keep its angle, keep the same JSON shape).
-Return the full corrected set as STRICT JSON: {{"items": [4 items]}}
-{STRICT_JSON}"""
-    out = do_call(prompt, max_tokens=2800, temperature=0.2, label="Reviewing the social kit")
-    fixed = [it for it in out.get("items", []) if isinstance(it, dict) and it.get("hook")]
-    return fixed[:4] if fixed else items
-
-def make_voiceover(brief):
-    """Call 5 — spoken explainer script. temp 0.5. Write for the EAR, not the eye."""
-    ctx = (f"{brief.get('explainer','')}\nHow it works: "
-           + " ".join(brief.get("how_it_works", [])))
-    prompt = f"""Write a voiceover script about this project. A text-to-speech voice reads out everything you write, exactly as you write it. So write speech, not text.
-
-Project context:
-{ctx}
-
-Write for the EAR, not the eye:
-- Plain sentences only. No markdown, no bullets, no headings, no emoji, no symbols, no parentheses.
-- No URLs, no domain names (not even github.com/owner/repo), no version numbers as digits — spell out anything that must be spoken.
-- Contractions everywhere ("it's", "you'll"). Short sentences. One idea per sentence.
-- Vary sentence length for pacing: a short punchy line after two longer ones.
-- Read it back mentally: if a sentence feels stiff spoken aloud, rewrite it.
-- Banned AI tics: "Here's the thing", "It's not just X, it's Y", "And that matters because".
-- 130-160 words total (about 60-90 seconds spoken).
-- Structure: hook (1 line) → what it is (2-3 lines) → how it works, simply (3-4 lines) → who it's for + close (2 lines).
-
-Return STRICT JSON: {{"script": "..."}}
-{STRICT_JSON}"""
-    script = ""
-    for attempt in range(3):
-        p = (prompt if attempt == 0
-             else prompt + "\nYour last script was empty or invalid. Write the full 130-160 word spoken script now.")
-        out = do_call(p, max_tokens=900, temperature=0.5, label="Writing the voiceover")
-        script = _clean_spoken(str(out.get("script", "")))
-        # hard gates: no URLs/domains may survive, and it must actually say something
-        if re.search(r"https?://|\bwww\.|\b(?:[a-zA-Z0-9-]+\.)+(?:com|io|dev|app|net|org)\b", script):
-            script = ""
+# ================= TEXT LLM (recipes) =================
+def _do_text(prompt, max_tokens, temperature, label="recipe step", _tries=3):
+    last_err = None
+    for attempt in range(_tries):
+        if attempt:
+            time.sleep(2 * attempt)
+        try:
+            r = requests.post(
+                DO_URL,
+                headers={"Authorization": f"Bearer {DO_API_KEY}", "Content-Type": "application/json"},
+                json={"model": DO_MODEL,
+                      "messages": [{"role": "user", "content": prompt}],
+                      "max_tokens": int(max_tokens * (1.5 ** attempt)),
+                      "temperature": 0.0 if attempt else temperature,
+                      "response_format": {"type": "json_object"}, "stream": False},
+                timeout=180)
+            r.raise_for_status()
+            content = r.json()["choices"][0]["message"]["content"] or ""
+        except Exception as e:
+            last_err = e
             continue
-        if len(script.split()) >= 30:
-            break
-        script = ""
-    if not script:
-        raise RuntimeError("the AI returned an empty voiceover script after retries")
-    return script
+        clean = re.sub(r'```(?:json)?', '', content).strip()
+        m = re.search(r'\{.*\}', clean, re.DOTALL)
+        try:
+            parsed = json.loads(m.group(0) if m else clean)
+            if isinstance(parsed, dict):
+                return parsed
+            last_err = ValueError("not a JSON object")
+        except Exception as e:
+            last_err = e
+            prompt = ("Your last response was not valid JSON. Return the COMPLETE object again, "
+                      "valid JSON only, no truncation.\n\nBroken output:\n" + (m.group(0) if m else clean)[:4000])
+    raise RuntimeError(f"{label} failed: {last_err}")
 
-def hook_image_prompt(hook, visual_hint):
-    return (f"Black and white minimalist Instagram poster, square 1:1. Huge bold sans-serif typography, "
-            f"perfectly legible, centered, reading exactly: \"{hook}\". "
-            f"Background: {visual_hint}, subtle and abstract, monochrome, lots of negative space. "
-            f"High contrast studio poster, clean professional design, no watermark, no logo, no extra text.")
+def generate_recipes(ingredients, cuisine, diet, max_time, servings, kcal_target):
+    ing = ", ".join(ingredients)
+    kcal_line = f"Each serving must stay under ~{kcal_target} kcal (honest estimate)." if kcal_target else ""
+    diet_line = f"Dietary rule: {diet}." if diet != "No restriction" else ""
+    prompt = f"""You are a creative, practical chef. A home cook has exactly these ingredients on hand:
+{ing}
+
+Assume basics are available: salt, pepper, oil, water, sugar.
+Constraints: cuisine = {cuisine}. {diet_line} Ready in under {max_time} minutes. Makes {servings} servings. {kcal_line}
+
+Write exactly 3 recipes with DISTINCT characters:
+1. QUICK — under 20 minutes, minimal effort.
+2. HEARTY — the most filling, complete meal of the three.
+3. CREATIVE — a surprising but delicious combo.
+
+RULES (follow exactly):
+- "uses" may ONLY contain items from the list above (match names loosely).
+- "missing": at most 3 extra items per recipe, common pantry things only, each with a "swap" (something from the list that could replace it, or "").
+- Never invent exotic ingredients. If a recipe can't work with what's here, don't fake it — pick one that can.
+- Steps: 4-8 concrete, ordered, beginner-friendly. No vague "cook until done" — give times and cues.
+- calories_est: honest per-serving estimate. difficulty: Easy/Medium.
+- The 3 recipes must not repeat each other's main idea.
+
+Return STRICT JSON: {{"recipes": [{{"title": "...", "character": "QUICK|HEARTY|CREATIVE", "time_min": 15, "calories_est": 450, "difficulty": "Easy", "uses": ["eggs", "tomatoes"], "missing": [{{"item": "feta", "swap": "any white cheese"}}], "steps": ["..."], "tip": "one pro tip"}}]}}
+""" + STRICT_JSON
+    out = _do_text(prompt, 3000, 0.6, label="recipe generation")
+    recs = [r for r in out.get("recipes", []) if isinstance(r, dict) and r.get("title")]
+    if not recs:
+        raise RuntimeError("the AI returned no recipes — try again")
+    return recs[:3]
 
 # ================= UI =================
 _CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-:root{--ink:#0A0A0A;--paper:#fff;--wash:#F7F7F7;--line:#E8E8E8;--muted:#737373;}
+:root{--ink:#1d1a16;--paper:#FFFCF7;--card:#fff;--line:#EDE4D6;--muted:#8a7f70;--green:#2E7D4F;--amber:#C2703D;}
 *{font-family:'Inter',-apple-system,'Segoe UI',sans-serif!important;}
 .stApp{background:var(--paper)!important;}
 #MainMenu,footer,header[data-testid="stHeader"]{display:none!important;}
-.block-container{max-width:880px!important;padding:0 20px 80px!important;}
+.block-container{max-width:860px!important;padding:0 20px 90px!important;}
 section[data-testid="stSidebar"]{display:none!important;}
 
-/* nav */
-.nav{display:flex;align-items:center;justify-content:space-between;padding:18px 0;border-bottom:1px solid var(--line);margin-bottom:8px;}
-.brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:17px;letter-spacing:-.02em;}
-.brand-mark{width:26px;height:26px;background:var(--ink);color:#fff;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;}
-.nav-note{font-size:12px;color:var(--muted);letter-spacing:.04em;}
-
-/* hero */
-.hero{text-align:center;padding:64px 8px 12px;}
-.kicker{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.22em;color:var(--muted);margin-bottom:18px;text-transform:uppercase;}
-.hero h1{font-size:clamp(2rem,6vw,3.4rem);font-weight:800;letter-spacing:-.045em;line-height:1.05;margin:0 0 16px;color:var(--ink);}
+.nav{display:flex;align-items:center;gap:10px;padding:18px 0;border-bottom:1px solid var(--line);}
+.brand-mark{width:30px;height:30px;border-radius:9px;background:var(--green);display:flex;align-items:center;justify-content:center;font-size:15px;}
+.brand{font-weight:800;font-size:18px;letter-spacing:-.02em;color:var(--ink);}
+.hero{text-align:center;padding:52px 8px 8px;}
+.hero h1{font-size:clamp(2rem,6vw,3.2rem);font-weight:800;letter-spacing:-.04em;line-height:1.06;margin:0 0 14px;color:var(--ink);}
+.hero h1 em{font-style:normal;color:var(--green);}
 .hero p{font-size:16px;color:var(--muted);max-width:520px;margin:0 auto;line-height:1.65;}
-div[data-testid="stTextInput"]{max-width:560px;margin:30px auto 0;}
-div[data-testid="stTextInput"] input{border-radius:10px!important;padding:15px 18px!important;font-size:15px!important;border:1px solid #D4D4D4!important;background:#fff!important;}
-div[data-testid="stTextInput"] input:focus{border-color:var(--ink)!important;box-shadow:0 0 0 3px rgba(0,0,0,.07)!important;}
-div[data-testid="stButton"]{max-width:560px;margin:12px auto 0;}
-div[data-testid="stButton"] button{background:var(--ink)!important;color:#fff!important;border:none!important;border-radius:10px!important;padding:15px!important;font-size:15px!important;font-weight:700!important;width:100%!important;transition:opacity .15s;}
-div[data-testid="stButton"] button:hover{opacity:.85!important;}
 
-/* steps */
-.steps{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin:34px 0 8px;}
-.step{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;color:#A3A3A3;border:1px solid var(--line);border-radius:999px;padding:8px 14px;background:#fff;}
-.step .n{width:20px;height:20px;border-radius:50%;background:var(--wash);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:10.5px;font-weight:700;}
-.step.done{color:var(--ink);border-color:#D4D4D4;}
-.step.done .n{background:var(--ink);color:#fff;border-color:var(--ink);}
-.step.active{color:var(--ink);border-color:var(--ink);}
-.step.active .n{background:#fff;border-color:var(--ink);animation:pulse 1.2s infinite;}
-@keyframes pulse{50%{transform:scale(1.15);}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px;margin-top:22px;box-shadow:0 2px 10px rgba(60,40,20,.04);}
+.card h3{margin:0 0 4px;font-size:17px;font-weight:700;letter-spacing:-.01em;color:var(--ink);}
+.card .sub{font-size:13.5px;color:var(--muted);margin:0 0 16px;}
 
-/* sections */
-.sec{margin-top:64px;}
-.sec-kicker{font-size:11px;font-weight:700;letter-spacing:.22em;color:var(--muted);text-transform:uppercase;margin-bottom:10px;}
-.sec-h{font-size:clamp(1.4rem,3.5vw,1.9rem);font-weight:800;letter-spacing:-.03em;margin:0 0 20px;color:var(--ink);}
-.tldr{background:var(--ink);color:#fff;border-radius:16px;padding:30px 28px;font-size:clamp(1.05rem,2.6vw,1.3rem);line-height:1.6;font-weight:500;letter-spacing:-.01em;}
-.explainer{font-size:16.5px;line-height:1.8;color:#262626;max-width:680px;}
-.diagram{border:1px solid var(--line);border-radius:14px;background:#fff;padding:12px;}
-.diagram img{width:100%;border-radius:8px;}
-.stepper{display:flex;flex-direction:column;gap:0;}
-.fstep{display:flex;gap:16px;padding:16px 4px;border-bottom:1px solid var(--line);}
-.fstep:last-child{border-bottom:none;}
-.fstep .fn{width:30px;height:30px;flex-shrink:0;border-radius:50%;background:var(--ink);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;}
-.fstep p{margin:2px 0 0;font-size:15px;line-height:1.6;color:#262626;}
+div[data-testid="stFileUploader"],div[data-testid="stCameraInput"]{margin-top:6px;}
+div[data-testid="stButton"] button{background:var(--green)!important;color:#fff!important;border:none!important;border-radius:11px!important;padding:13px 22px!important;font-size:15px!important;font-weight:700!important;transition:opacity .15s;}
+div[data-testid="stButton"] button:hover{opacity:.88!important;}
+div[data-testid="stButton"] button:disabled{opacity:.45!important;}
 
-/* audio */
-.audio-card{border:1px solid var(--line);border-radius:14px;padding:22px;background:var(--wash);}
-div[data-testid="stAudio"]{margin-bottom:6px;}
-.script{font-size:15px;line-height:1.85;color:#404040;border-left:3px solid var(--ink);padding-left:18px;margin:18px 0 0;font-style:italic;}
+.ing{display:inline-flex;align-items:center;gap:7px;background:#F3EFE6;border:1px solid var(--line);border-radius:999px;padding:7px 14px;margin:0 8px 10px 0;font-size:13.5px;font-weight:600;color:var(--ink);}
+.ing small{color:var(--muted);font-weight:500;}
+.badges{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 4px;}
+.badge{font-size:12px;font-weight:700;background:#F3EFE6;border:1px solid var(--line);border-radius:7px;padding:5px 11px;color:var(--ink);}
+.badge.kcal{background:#FFF4E8;border-color:#F0DCC2;color:#9A5B1E;}
+.badge.char{background:var(--green);border-color:var(--green);color:#fff;}
 
-/* instagram kit */
-.post{border:1px solid var(--line);border-radius:16px;overflow:hidden;margin-bottom:28px;background:#fff;}
-.post-grid{display:grid;grid-template-columns:300px 1fr;}
-.post-img{background:var(--wash);}
-.post-img img{width:100%;aspect-ratio:1/1;object-fit:cover;display:block;}
-.post-body{padding:26px 26px 22px;}
-.post-angle{font-size:10.5px;font-weight:700;letter-spacing:.2em;color:var(--muted);text-transform:uppercase;margin-bottom:10px;}
-.post-hook{font-size:19px;font-weight:800;letter-spacing:-.02em;line-height:1.3;margin:0 0 14px;color:var(--ink);}
-.post-cap{font-size:14.5px;line-height:1.7;color:#404040;white-space:pre-line;margin:0 0 14px;}
-.tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:18px;}
-.tag{font-size:12px;font-weight:600;color:var(--muted);background:var(--wash);border:1px solid var(--line);padding:4px 10px;border-radius:6px;}
-div[data-testid="stDownloadButton"] button{border-radius:8px!important;border:1px solid #D4D4D4!important;background:#fff!important;color:var(--ink)!important;font-weight:600!important;font-size:13px!important;padding:8px 16px!important;}
-div[data-testid="stDownloadButton"] button:hover{background:var(--ink)!important;color:#fff!important;}
+.have{font-size:13.5px;color:var(--ink);margin:6px 0;line-height:1.9;}
+.have b{color:var(--green);}
+.miss{font-size:13.5px;color:var(--ink);margin:6px 0;line-height:1.9;}
+.miss b{color:var(--amber);}
+.steps{margin:14px 0 0;padding:0;list-style:none;counter-reset:s;}
+.steps li{counter-increment:s;font-size:14.5px;line-height:1.65;color:#3d382f;margin-bottom:10px;padding-left:38px;position:relative;}
+.steps li::before{content:counter(s);position:absolute;left:0;top:1px;width:24px;height:24px;border-radius:50%;background:var(--green);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;}
+.tip{background:#FFF8EC;border:1px dashed #E4C88F;border-radius:10px;padding:12px 16px;font-size:13.5px;color:#7a5a22;margin-top:16px;}
 
-/* report + footer */
-div[data-testid="stExpander"]{border:1px solid var(--line)!important;border-radius:12px!important;}
-.report-row{display:flex;justify-content:space-between;font-size:13.5px;padding:8px 0;border-bottom:1px solid var(--line);color:#404040;}
-.report-row:last-child{border:none;}
-.ok{color:#15803d;font-weight:700;} .bad{color:#b91c1c;font-weight:700;} .info{color:var(--muted);font-weight:600;}
-.footer{margin-top:72px;padding-top:24px;border-top:1px solid var(--line);text-align:center;font-size:12.5px;color:var(--muted);}
+.shop{background:var(--ink);color:#fff;border-radius:16px;padding:26px;margin-top:26px;}
+.shop h3{color:#fff;margin:0 0 12px;font-size:17px;}
+.shop ul{margin:0;padding-left:20px;}
+.shop li{font-size:14.5px;line-height:2;color:rgba(255,255,255,.85);}
+.shop li span{color:rgba(255,255,255,.55);font-size:13px;}
+
+.sec-t{font-size:13px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin:34px 0 4px;}
 .stAlert{border-radius:10px!important;}
-
-@media(max-width:700px){
-  .post-grid{grid-template-columns:1fr;}
-  .hero{padding:44px 4px 8px;}
-  .tldr{padding:24px 20px;}
-  .post-body{padding:20px;}
-  .nav-note{display:none;}
-}
+div[data-testid="stExpander"]{border:1px solid var(--line)!important;border-radius:12px!important;background:#fff!important;}
+@media(max-width:640px){.card{padding:18px;}.hero{padding-top:36px;}}
 </style>
 """
 
-def render_steps(done, active=None):
-    labels = ["Reading repo", "Understanding project", "Drawing the diagram",
-              "Writing the social kit", "Creating visuals", "Recording audio"]
-    keys = ["fetch", "comprehend", "diagram", "social", "visuals", "audio"]
-    out = ['<div class="steps">']
-    for k, lab in zip(keys, labels):
-        cls = "done" if k in done else ("active" if k == active else "")
-        mark = "✓" if k in done else str(keys.index(k) + 1)
-        out.append(f'<div class="step {cls}"><span class="n">{mark}</span>{lab}</div>')
-    out.append('</div>')
-    return "".join(out)
-
-# ================= PAGE =================
-st.set_page_config(page_title="HypeRepo — paste a repo, get its story", layout="centered")
+st.set_page_config(page_title="FridgeSnap — snap it, cook it", layout="centered")
 st.markdown(_CSS, unsafe_allow_html=True)
-st.markdown('<div class="nav"><div class="brand"><div class="brand-mark">H</div>HypeRepo</div>'
-            '<div class="nav-note">REPO → STORY</div></div>', unsafe_allow_html=True)
-st.markdown('<div class="hero"><div class="kicker">AI repo explainer</div>'
-            '<h1>Paste a repo.<br>Get its story.</h1>'
-            '<p>A clean diagram of how it works, four scroll-stopping visuals with captions, '
-            'and a plain-English audio explanation — all generated from the actual code.</p></div>',
+st.markdown('<div class="nav"><div class="brand-mark">🥑</div><div class="brand">FridgeSnap</div></div>',
+            unsafe_allow_html=True)
+st.markdown('<div class="hero"><h1>Snap your fridge.<br><em>Cook what\'s inside.</em></h1>'
+            '<p>Take a photo of your fridge, confirm what the AI spots, pick a cuisine — '
+            'get three recipes built from <b>your</b> ingredients, plus a shopping list for what\'s missing.</p></div>',
             unsafe_allow_html=True)
 
 if not DO_API_KEY or not ALIBABA_API_KEY:
     st.error("Missing API keys — add `DO_API_KEY` and `ALIBABA_API_KEY` in the app's Secrets settings.")
     st.stop()
 
-repo_url = st.text_input("repo", placeholder="https://github.com/owner/repo", label_visibility="collapsed")
-go = st.button("Generate the story", use_container_width=True)
+# ---------- session state ----------
+for k, v in [("photo", None), ("detected", None), ("recipes", None), ("confirmed", [])]:
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-if go:
-    if not repo_url.strip() or "github.com" not in repo_url:
-        st.error("Please paste a valid GitHub repo URL.")
-        st.stop()
+# ---------- 1. photo ----------
+st.markdown('<div class="card"><h3>1 · Show me your fridge</h3>'
+            '<p class="sub">Upload a photo or snap one right now — brighter and fuller is better.</p></div>',
+            unsafe_allow_html=True)
+tab_up, tab_cam = st.tabs(["📤 Upload", "📷 Camera"])
+with tab_up:
+    up = st.file_uploader("fridge photo", type=["jpg", "jpeg", "png", "webp"], label_visibility="collapsed")
+    if up:
+        st.session_state.photo = (up.getvalue(), up.type)
+with tab_cam:
+    cam = st.camera_input("take a photo", label_visibility="collapsed")
+    if cam:
+        st.session_state.photo = (cam.getvalue(), cam.type)
 
-    steps_ph = st.empty()
-    order = ["fetch", "comprehend", "diagram", "social", "visuals", "audio"]
-    done = []
-    failed = None
-    results = {}
-
-    def tick(key):
-        done.append(key)
-        nxt = next((k for k in order if k not in done), None)
-        steps_ph.markdown(render_steps(done, active=nxt), unsafe_allow_html=True)
-
-    # ---- fatal section: everything downstream needs the repo + the brief ----
-    current = "Reading the repo"
-    try:
-        steps_ph.markdown(render_steps(done, active="fetch"), unsafe_allow_html=True)
-        repo = fetch_repo(repo_url.strip())
-        tick("fetch")
-
-        current = "Understanding the project"
-        brief = comprehend(repo["context"])
-        results["brief"] = brief
-        tick("comprehend")
-    except Exception as e:
-        failed = (current, e)
-
-    # ---- soft sections: a failure degrades one section, never the run ----
-    warnings = []
-    if failed is None:
-        try:
-            mermaid = build_diagram(brief.get("how_it_works", []))
-            d_bytes, d_err = fetch_diagram(mermaid)
-            if d_err:
-                warnings.append(f"Diagram render: {d_err}")
-        except Exception as e:
-            mermaid, d_bytes, d_err = "", None, str(e)[:150]
-            warnings.append(f"Diagram: {str(e)[:150]}")
-        results.update(mermaid=mermaid, diagram=d_bytes, diagram_err=d_err)
-        tick("diagram")
-
-        try:
-            items = make_social(brief)
-            items = critique_social(brief, items)
-        except Exception as e:
-            items = []
-            warnings.append(f"Social kit: {str(e)[:150]}")
-        results["items"] = items
-        tick("social")
-
-        images = []
-        for idx, it in enumerate(items):
-            if idx:
-                time.sleep(4)  # breathing room: Alibaba throttles rapid-fire requests
-            png, err = qwen_image(hook_image_prompt(it.get("hook", ""), it.get("visual_hint", "abstract minimal shapes")))
-            images.append({"png": png, "err": err})
-        results["images"] = images
-        results["stats"] = repo.get("stats", {})
-        tick("visuals")
-
-        try:
-            script = make_voiceover(brief)
-        except Exception as e:
-            script = ""
-            warnings.append(f"Voiceover script: {str(e)[:150]}")
-        if script:
-            audio, a_err = make_audio(script)
-            if a_err:
-                warnings.append(f"Audio: {a_err}")
+if st.session_state.photo:
+    st.image(st.session_state.photo[0], caption="Your fridge", use_container_width=True)
+    if st.button("🔍 Identify ingredients", use_container_width=True):
+        with st.spinner("Peeking inside your fridge…"):
+            raw, mime = st.session_state.photo
+            small, mime2 = prep_image(raw, mime)
+            items, err = detect_ingredients(small, mime2)
+        if err:
+            st.error(err)
+            st.session_state.detected = None
         else:
-            audio, a_err = None, "script unavailable"
-        results.update(script=script, audio=audio, audio_err=a_err)
-        tick("audio")
+            st.session_state.detected = items
+            st.session_state.confirmed = [it["name"] for it in items if it.get("confidence") != "low"]
+            st.session_state.recipes = None
+            st.rerun()
 
-    steps_ph.markdown(render_steps(done), unsafe_allow_html=True)
-    if failed is not None:
-        step_label, e = failed
-        st.error(f"The run stopped while {step_label.lower()}.")
-        st.write(f"**What happened:** {html.escape(str(e)[:400])}")
-        with st.expander("Technical details"):
-            st.code(f"{type(e).__name__}: {e}")
-        st.stop()
+# ---------- 2. confirm ingredients ----------
+if st.session_state.detected:
+    st.markdown('<div class="card"><h3>2 · Confirm what\'s in there</h3>'
+                '<p class="sub">Uncheck anything the AI got wrong, add what it missed.</p></div>',
+                unsafe_allow_html=True)
+    cols = st.columns(2)
+    checked = []
+    for i, it in enumerate(st.session_state.detected):
+        name = it["name"]
+        label = f"{name}" + (f"  ·  {it['amount']}" if it.get("amount") else "")
+        with cols[i % 2]:
+            if st.checkbox(label, value=name in st.session_state.confirmed, key=f"ing_{i}"):
+                checked.append(name)
+    extra = st.text_input("Add missing items (comma separated)",
+                          placeholder="e.g. rice, soy sauce, garlic")
+    if extra.strip():
+        checked += [x.strip() for x in extra.split(",") if x.strip()]
+    # de-dupe, keep order
+    seen, confirmed = set(), []
+    for x in checked:
+        if x.lower() not in seen:
+            seen.add(x.lower())
+            confirmed.append(x)
+    st.session_state.confirmed = confirmed
+    if confirmed:
+        st.markdown("<div style='margin-top:6px'>" + "".join(
+            f'<span class="ing">{html.escape(c)}</span>' for c in confirmed) + "</div>",
+            unsafe_allow_html=True)
 
-    brief, items = results["brief"], results["items"]
-    repo_name = re.sub(r"\W+", "_", repo["repo"])[:30]
+    # ---------- 3. options ----------
+    st.markdown('<div class="card"><h3>3 · How do you want it?</h3>'
+                '<p class="sub">Tune it to your craving and your goals.</p></div>',
+                unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        cuisine = st.selectbox("Cuisine", CUISINES)
+        diet = st.selectbox("Diet", DIETS)
+    with c2:
+        max_time = st.slider("Max cooking time (min)", 10, 90, 30, step=5)
+        servings = st.number_input("Servings", 1, 8, 2)
+    use_kcal = st.checkbox("Set a calorie target per serving")
+    kcal_target = st.slider("Max kcal per serving", 200, 1200, 500, step=50) if use_kcal else 0
 
-    # 1 — short version
-    st.markdown('<div class="sec"><div class="sec-kicker">The short version</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="tldr">{html.escape(brief.get("short_text", ""))}</div></div>', unsafe_allow_html=True)
+    if st.button("🍳 Get my recipes", type="primary", use_container_width=True, disabled=not confirmed):
+        with st.spinner("Cooking up three recipes…"):
+            try:
+                st.session_state.recipes = generate_recipes(
+                    confirmed, cuisine, diet, max_time, servings, kcal_target)
+            except Exception as e:
+                st.error(f"Couldn't generate recipes: {html.escape(str(e))[:250]}")
+                st.session_state.recipes = None
 
-    # 2 — diagram
-    st.markdown('<div class="sec"><div class="sec-kicker">How it works</div>'
-                '<div class="sec-h">The whole app, one diagram.</div>', unsafe_allow_html=True)
-    if results["diagram"]:
-        st.markdown('<div class="diagram">', unsafe_allow_html=True)
-        st.image(results["diagram"])
-        st.markdown('</div>', unsafe_allow_html=True)
-        st.download_button("Download diagram (PNG)", results["diagram"],
-                           file_name=f"{repo_name}_how_it_works.png", mime="image/png")
-    else:
-        st.warning(f"Couldn't render the diagram ({html.escape(results['diagram_err'][:120])}) — here are the steps instead:")
-        steps_html = "".join(
-            f'<div class="fstep"><div class="fn">{i+1}</div><p>{html.escape(re.sub(r"\[[^\]]+\]", "", s).strip())}</p></div>'
-            for i, s in enumerate(brief.get("how_it_works", [])))
-        st.markdown(f'<div class="stepper">{steps_html}</div>', unsafe_allow_html=True)
-    with st.expander("Diagram source (Mermaid)"):
-        st.code(results["mermaid"], language="mermaid")
-    st.markdown('</div>', unsafe_allow_html=True)
+# ---------- 4. recipes ----------
+if st.session_state.recipes:
+    st.markdown('<div class="sec-t">Your recipes</div>', unsafe_allow_html=True)
+    all_missing = {}
+    for r in st.session_state.recipes:
+        have_n = len(r.get("uses", []))
+        st.markdown(f"""<div class="card">
+          <div class="badges"><span class="badge char">{html.escape(str(r.get('character', '')))}</span>
+          <span class="badge">⏱ {r.get('time_min', '?')} min</span>
+          <span class="badge kcal">{r.get('calories_est', '?')} kcal/serv</span>
+          <span class="badge">{html.escape(str(r.get('difficulty', '')))}</span></div>
+          <h3 style="font-size:20px;margin-top:10px">{html.escape(r.get('title', ''))}</h3>
+          <p class="have"><b>✓ From your fridge ({have_n}):</b> {html.escape(", ".join(r.get('uses', [])) or "—")}</p>""",
+            unsafe_allow_html=True)
+        miss = r.get("missing", [])
+        if miss:
+            miss_html = "; ".join(
+                f"<b>{html.escape(str(m.get('item', '')))}</b>"
+                + (f" <span style='color:var(--muted)'>(or {html.escape(str(m['swap']))})</span>" if m.get("swap") else "")
+                for m in miss if isinstance(m, dict))
+            st.markdown(f'<p class="miss"><b>＋ You\'ll need:</b> {miss_html}</p>', unsafe_allow_html=True)
+            for m in miss:
+                if isinstance(m, dict) and m.get("item"):
+                    all_missing[m["item"]] = m.get("swap", "")
+        steps_html = "".join(f"<li>{html.escape(str(s))}</li>" for s in r.get("steps", []))
+        st.markdown(f'<ol class="steps">{steps_html}</ol>', unsafe_allow_html=True)
+        if r.get("tip"):
+            st.markdown(f'<div class="tip">💡 {html.escape(str(r["tip"]))}</div>', unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    # 3 — explainer
-    st.markdown('<div class="sec"><div class="sec-kicker">The explanation</div>'
-                '<div class="sec-h">What this repo actually is.</div>', unsafe_allow_html=True)
-    st.markdown(f'<p class="explainer">{html.escape(brief.get("explainer", ""))}</p></div>', unsafe_allow_html=True)
+    if all_missing:
+        lis = "".join(
+            f"<li>{html.escape(k)}" + (f" <span>— or use {html.escape(v)}</span>" if v else "") + "</li>"
+            for k, v in all_missing.items())
+        st.markdown(f'<div class="shop"><h3>🛒 Shopping list</h3><ul>{lis}</ul></div>',
+                    unsafe_allow_html=True)
 
-    # 4 — audio
-    st.markdown('<div class="sec"><div class="sec-kicker">Listen</div>'
-                '<div class="sec-h">The 60-second version, out loud.</div>', unsafe_allow_html=True)
-    st.markdown('<div class="audio-card">', unsafe_allow_html=True)
-    if results["audio"]:
-        st.audio(results["audio"], format="audio/mp3")
-        st.download_button("Download audio (MP3)", results["audio"],
-                           file_name=f"{repo_name}_explainer.mp3", mime="audio/mp3")
-    else:
-        st.warning(f"Audio failed: {html.escape(results['audio_err'][:150])}")
-    if results["script"]:
-        st.markdown(f'<p class="script">"{html.escape(results["script"])}"</p>', unsafe_allow_html=True)
-    st.markdown('</div></div>', unsafe_allow_html=True)
-
-    # 5 — instagram kit
-    st.markdown('<div class="sec"><div class="sec-kicker">Instagram kit</div>'
-                '<div class="sec-h">Four hooks. Four captions. Zero repetition.</div>', unsafe_allow_html=True)
-    if not items:
-        st.warning("The social kit couldn't be generated this run — everything else on this page is fine.")
-    for i, it in enumerate(items):
-        img = results["images"][i] if i < len(results["images"]) else {"png": None, "err": "missing"}
-        tags = "".join(f'<span class="tag">#{html.escape(str(t).lstrip("#"))}</span>' for t in it.get("hashtags", []))
-        if img["png"]:
-            st.markdown('<div class="diagram" style="margin-bottom:14px;">', unsafe_allow_html=True)
-            st.image(img["png"])
-            st.markdown('</div>', unsafe_allow_html=True)
-        st.markdown(
-            f'<div class="post"><div class="post-body">'
-            f'<div class="post-angle">{html.escape(str(it.get("angle", "")))}</div>'
-            f'<p class="post-hook">{html.escape(str(it.get("hook", "")))}</p>'
-            f'<p class="post-cap">{html.escape(str(it.get("caption", "")))}</p>'
-            f'<div class="tags">{tags}</div>'
-            f'</div></div>', unsafe_allow_html=True)
-        if img["png"]:
-            st.download_button(f"Download visual {i+1} (PNG)", img["png"],
-                               file_name=f"{repo_name}_hook_{i+1}.png", mime="image/png",
-                               key=f"dl_img_{i}")
-        else:
-            st.warning(f"Visual {i+1} failed: {html.escape(str(img['err'])[:150])}")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # report
-    with st.expander("Generation report"):
-        rows = []
-        stt = results.get("stats", {})
-        rows.append(("Repo context",
-                     f"{stt.get('readme_chars', 0)} readme chars, "
-                     f"{stt.get('files', 0)} files, {stt.get('excerpts', 0)} code excerpts"))
-        rows.append(("Diagram", "OK" if results["diagram"] else f"FAILED — {results['diagram_err'][:100]}"))
-        for i, im in enumerate(results["images"]):
-            rows.append((f"Visual {i+1}", "OK" if im["png"] else f"FAILED — {str(im['err'])[:100]}"))
-        rows.append(("Audio", "OK" if results["audio"] else f"FAILED — {results['audio_err'][:100]}"))
-        for label, status in rows:
-            cls = "ok" if status == "OK" else ("info" if label == "Repo context" else "bad")
-            st.markdown(f'<div class="report-row"><span>{html.escape(label)}</span>'
-                        f'<span class="{cls}">{html.escape(status)}</span></div>', unsafe_allow_html=True)
-        for w in warnings:
-            st.markdown(f'<div class="report-row"><span>Notice</span>'
-                        f'<span class="bad">{html.escape(w)}</span></div>', unsafe_allow_html=True)
-
-st.markdown('<div class="footer">HypeRepo — paste a repo, get its story. Built from real code, not templates.</div>',
+st.markdown('<div style="text-align:center;color:#a89c8a;font-size:12.5px;margin-top:56px">'
+            'FridgeSnap — snap it, cook it. Estimates only, not medical nutrition advice.</div>',
             unsafe_allow_html=True)
