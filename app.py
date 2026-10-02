@@ -263,18 +263,6 @@ def _sanitize_mermaid(code):
     t = re.sub(r"[()]", "", t)
     return t.strip()
 
-def _simple_mermaid(steps):
-    """Minimal ASCII-only fallback diagram built from step titles — almost always renders."""
-    nodes = []
-    for i, s in enumerate((steps or [])[:6]):
-        label = re.sub(r"\[[^\]]+\]", "", str(s))  # drop [file.ts] citations
-        label = re.sub(r"[^A-Za-z0-9 :/-]", "", label).strip()[:30] or f"Step {i+1}"
-        nodes.append(f"    N{i}[{label}]")
-    if not nodes:
-        return ""
-    edges = "\n".join(f"    N{i} --> N{i+1}" for i in range(len(nodes) - 1))
-    return "flowchart TD\n" + "\n".join(nodes) + ("\n" + edges if edges else "")
-
 def _render_mermaid(code):
     try:
         r = requests.get(mermaid_image_url(code), timeout=30)
@@ -284,21 +272,14 @@ def _render_mermaid(code):
         pass
     return None
 
-def fetch_diagram(code, steps=None):
-    """Returns (png_bytes, error_str). Sanitizes, retries with a minimal diagram,
-    then falls back gracefully (caller shows the steps instead)."""
+def fetch_diagram(code):
+    """Returns (png_bytes, error_str). The code is built deterministically in Python;
+    just sanitize and render it. Caller shows the steps instead on failure."""
     code = _sanitize_mermaid(re.sub(r'```(?:mermaid)?', '', code or ""))
-    if "flowchart" not in code and "graph" not in code:
-        code = ""
-    img = _render_mermaid(code) if code else None
-    if img:
-        return img, ""
-    # second chance: minimal ASCII diagram from the step titles
-    simple = _simple_mermaid(steps)
-    img = _render_mermaid(simple) if simple else None
-    if img:
-        return img, ""
-    return None, "diagram service couldn't render it"
+    if "flowchart" not in code:
+        return None, "no diagram code"
+    img = _render_mermaid(code)
+    return (img, "") if img else (None, "diagram service couldn't render it")
 
 # ================= GITHUB =================
 CODE_EXTS = (".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".rb", ".php", ".swift", ".kt")
@@ -424,9 +405,39 @@ def fetch_repo(repo_url):
     return {"owner": owner, "repo": repo, "meta": meta, "context": context, "stats": stats}
 
 # ================= LLM CALLS =================
+def _field_empty(v):
+    if isinstance(v, list):
+        return not [x for x in v if str(x).strip()]
+    return not str(v or "").strip()
+
+def _reliable_json(prompt, fields, max_tokens, label):
+    """One focused JSON call with validation: re-asks for exactly the missing
+    fields (max 2), then raises loudly instead of returning a partial object
+    that would poison downstream steps."""
+    b = do_call(prompt, max_tokens, 0.1, label=label)
+    for _ in range(2):
+        missing = [f for f in fields if _field_empty(b.get(f))] if isinstance(b, dict) else fields
+        banned = [w for w in REJECT_WORDS if w in json.dumps(b).lower()] if isinstance(b, dict) else []
+        if not missing and not banned:
+            return b
+        bits = []
+        if missing:
+            bits.append("these fields were empty or missing: " + ", ".join(missing)
+                        + " — fill every one from the repo context, no exceptions")
+        if banned:
+            bits.append("you used banned generic-marketing words (" + ", ".join(banned)
+                        + ") — rewrite avoiding them completely")
+        b = do_call(prompt + "\nYour last response had problems: " + "; ".join(bits)
+                    + ". Return the full corrected JSON.",
+                    max_tokens, 0.1, label=label)
+    missing = [f for f in fields if _field_empty(b.get(f))] if isinstance(b, dict) else fields
+    if missing:
+        raise RuntimeError(f"the AI left these fields empty after retries: {', '.join(missing)}")
+    return b
+
 def comprehend(ctx):
-    """Call 1 — deep understanding. temp 0.1 for fidelity."""
-    prompt = f"""You are a senior engineer who has read this exact codebase. Base everything ONLY on the repo context below. If the context doesn't support a claim, write "not clear from context" instead of inventing.
+    """Two small focused calls (reliable on a 20B model) merged into one brief."""
+    p1 = f"""You are a senior engineer who has read this exact codebase. Base everything ONLY on the repo context below. If the context doesn't support a claim, write "not clear from context" instead of inventing.
 
 RULE: Every claim must name something real from the repo context: a file path, a command, a config key, a function name, or a README section. A sentence with no concrete reference is a failed sentence — rewrite it.
 
@@ -438,86 +449,48 @@ Repo context:
 Return STRICT JSON with exactly these fields:
 {{
   "explainer": "120-180 words. Explain this repo to a smart friend who doesn't code. No jargon; if you must use a technical term, define it in the same sentence.",
-  "short_text": "2-3 sentences COMPRESSED FROM your explainer above — same facts, shorter. This is never empty and never 'not clear from context' when the explainer exists.",
+  "short_text": "2-3 sentences COMPRESSED FROM your explainer above — same facts, shorter. Never empty when the explainer exists.",
+  "audience": "who this is for, specifically (not 'developers' — which developers, doing what). Derive from the repo context, never leave empty."
+}}
+{STRICT_JSON}"""
+    p2 = f"""You are a senior engineer who has read this exact codebase. Base everything ONLY on the repo context below.
+
+RULE: Every claim must name something real from the repo context: a file path, a command, a config key, a function name, or a README section. A sentence with no concrete reference is a failed sentence — rewrite it.
+
+Repo context:
+{ctx}
+
+Return STRICT JSON with exactly these fields:
+{{
   "how_it_works": ["4-6 steps, in order, one sentence each. Each step must cite the file(s) it comes from, e.g. [src/render.ts]. Steps must form a chain: the output of step N is the input of step N+1. If a step can't be tied to a file in the context, drop it — do not bridge gaps with guesses."],
-  "audience": "who this is for, specifically (not 'developers' — which developers, doing what). Derive from the repo context, never leave empty.",
   "proof_points": ["3-5 concrete, verifiable facts from the context: numbers, features, file names, commands. Never empty when the context has code."]
 }}
 {STRICT_JSON}"""
-    def _problems(b):
-        if not isinstance(b, dict):
-            return ["response was not a JSON object"]
-        ps = []
-        if not str(b.get("explainer", "")).strip():
-            ps.append("explainer")
-        if not str(b.get("short_text", "")).strip():
-            ps.append("short_text")
-        hiw = b.get("how_it_works", [])
-        if not isinstance(hiw, list) or not [s for s in hiw if str(s).strip()]:
-            ps.append("how_it_works")
-        if not str(b.get("audience", "")).strip():
-            ps.append("audience")
-        pp = b.get("proof_points", [])
-        if not isinstance(pp, list) or not [s for s in pp if str(s).strip()]:
-            ps.append("proof_points")
-        return ps
+    b1 = _reliable_json(p1, ["explainer", "short_text", "audience"], 1200, "Understanding the project (1/2)")
+    b2 = _reliable_json(p2, ["how_it_works", "proof_points"], 1200, "Understanding the project (2/2)")
+    return {**b1, **b2}
 
-    b = do_call(prompt, max_tokens=1800, temperature=0.1, label="Understanding the project")
-    # Validate — never let empty fields slip through silently (they poison
-    # every downstream step: empty short_text once made the social kit invent
-    # a whole different project). Re-ask for exactly what's missing.
-    for _ in range(2):
-        missing = _problems(b)
-        banned = [w for w in REJECT_WORDS if w in json.dumps(b).lower()]
-        if not missing and not banned:
-            break
-        bits = []
-        if missing:
-            bits.append("these fields were empty or missing: " + ", ".join(missing)
-                        + " — fill every one from the repo context, no exceptions")
-        if banned:
-            bits.append("you used banned generic-marketing words (" + ", ".join(banned)
-                        + ") — rewrite avoiding them completely")
-        b = do_call(prompt + "\nYour last response had problems: " + "; ".join(bits)
-                    + ". Return the full corrected JSON.",
-                    max_tokens=1800, temperature=0.1, label="Understanding the project")
-    missing = _problems(b)
-    if missing:
-        raise RuntimeError(f"the AI left these fields empty after retries: {', '.join(missing)}")
-    return b
-
-def make_diagram(brief):
-    """Call 2 — mermaid flowchart from the how-it-works steps. temp 0.1."""
-    steps = "\n".join(f"{i+1}. {s}" for i, s in enumerate(brief.get("how_it_works", [])))
-    prompt = f"""You are a technical diagrammer. Turn these how-it-works steps into a clean flowchart.
-
-Steps:
-{steps}
-
-Rules:
-- Output valid Mermaid code starting with "flowchart TD", 4-7 nodes max.
-- Node labels: 2-5 plain words each, no jargon, no parentheses, no quotes, no special characters.
-- Keep every node traceable to the steps above — no invented stages.
-- End with one node showing the outcome for the user.
-
-Return STRICT JSON: {{"mermaid": "flowchart TD\\n    A[First thing] --> B[Second thing]"}}
-{STRICT_JSON}"""
-    code = ""
-    for attempt in range(2):
-        p = (prompt if attempt == 0
-             else prompt + "\nYour last response was not Mermaid code. Output ONLY the flowchart code "
-                          "starting with 'flowchart TD' inside the JSON — no explanations, no JSON dumps.")
-        out = do_call(p, max_tokens=800, temperature=0.1, label="Drawing the diagram")
-        code = re.sub(r'```(?:mermaid)?', '', str(out.get("mermaid", ""))).strip()
-        if code.startswith("flowchart") or code.startswith("graph"):
-            break
-        code = ""
-    return code
-
-EXAMPLE_ITEM = ('{"angle": "THE PROBLEM", "hook": "Dinner panic at 7pm again?", '
-                '"visual_hint": "empty fridge glowing in a dark kitchen", '
-                '"caption": "You open the fridge. Nothing makes sense together.\\nChefBot looks at what you actually have and builds dinner around it — no shopping trip.", '
-                '"hashtags": ["#mealprep", "#home cooking", "#foodtech", "#indiehackers"]}')
+def build_diagram(steps):
+    """Deterministic flowchart from the validated how_it_works steps. No LLM call —
+    the steps are already good, so building the graph in code can't flake,
+    hallucinate, or echo JSON back at us."""
+    nodes = []
+    for i, s in enumerate((steps or [])[:6]):
+        t = re.sub(r"\[[^\]]+\]", "", str(s))  # strip [file.ts] citations
+        t = re.sub(r"\([^)]*\)", "", t)        # strip (parenthetical asides)
+        label = " ".join(t.strip().split()[:8]).rstrip(".,;:")
+        label = re.sub(r"[^A-Za-z0-9 :/-]", "", label).strip()
+        short, out = label.split(), ""
+        for w in short:
+            if len(out) + len(w) + 1 > 40:
+                break
+            out = (out + " " + w).strip()
+        label = out or f"Step {i+1}"
+        nodes.append(f"    N{i}[{label}]")
+    if not nodes:
+        return ""
+    edges = "\n".join(f"    N{i} --> N{i+1}" for i in range(len(nodes) - 1))
+    return "flowchart TD\n" + "\n".join(nodes) + ("\n" + edges if edges else "")
 
 def make_social(brief):
     """Call 3 — 4 angle-assigned social items. temp 0.7 for creativity."""
@@ -768,8 +741,8 @@ if go:
     warnings = []
     if failed is None:
         try:
-            mermaid = make_diagram(brief)
-            d_bytes, d_err = fetch_diagram(mermaid, brief.get("how_it_works", []))
+            mermaid = build_diagram(brief.get("how_it_works", []))
+            d_bytes, d_err = fetch_diagram(mermaid)
             if d_err:
                 warnings.append(f"Diagram render: {d_err}")
         except Exception as e:
