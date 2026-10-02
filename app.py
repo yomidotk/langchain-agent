@@ -10,11 +10,8 @@ import streamlit as st
 import dashscope
 from http import HTTPStatus
 from dashscope.audio.tts import SpeechSynthesizer
-from pydantic import BaseModel, Field
-from typing import List
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import PydanticOutputParser
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 DO_API_KEY = st.secrets.get("DO_API_KEY", "")
@@ -26,6 +23,25 @@ VISION_MODEL = "qwen-vl-max"
 
 CUISINES = ["Anything", "Italian", "Mexican", "Asian", "Indian", "Mediterranean", "French", "American"]
 DIETS    = ["No restriction", "Vegetarian", "Vegan", "Halal", "Gluten-free", "High-protein"]
+
+# ── Auto-scroll Helper ─────────────────────────────────────────────────────────
+def auto_scroll(anchor_id: str, delay_ms: int = 80):
+    """Smoothly scroll the browser viewport directly to the active element/stage."""
+    st.markdown(f"""
+    <div id="{anchor_id}" style="height:1px;margin-top:-8px;"></div>
+    <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1' height='1'%3E%3C/svg%3E" 
+         style="display:none;" 
+         onload="(function(){{
+             setTimeout(function(){{
+                 var el = document.getElementById('{anchor_id}');
+                 if (el) {{
+                     el.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+                 }} else {{
+                     window.scrollTo({{ top: 0, behavior: 'smooth' }});
+                 }}
+             }}, {delay_ms});
+         }})();" />
+    """, unsafe_allow_html=True)
 
 # ── Image helpers ───────────────────────────────────────────────────────────────
 def get_dish_image(dish_name: str) -> str | None:
@@ -41,7 +57,6 @@ def get_dish_image(dish_name: str) -> str | None:
             d = r.json()
             thumb = d.get("thumbnail", {}).get("source") or d.get("originalimage", {}).get("source")
             if thumb:
-                # Scale up to crisp resolution
                 return re.sub(r"/(\d+)px-", "/640px-", thumb)
     except Exception:
         pass
@@ -130,58 +145,190 @@ def detect_ingredients(img_bytes, mime):
     except Exception as e:
         return None, f"Vision error: {str(e)[:300]}"
 
-# ── LangChain models ────────────────────────────────────────────────────────────
-class MissingItem(BaseModel):
-    item: str = Field(description="Missing ingredient name")
-    swap: str = Field(default="", description="A substitute from the provided list")
+# ── Robust Recipe Parser (Prevents OUTPUT_PARSING_FAILURE) ─────────────────────
+def extract_and_parse_recipes(raw_text: str) -> list:
+    """Robustly extract and normalize 3 recipes from LLM text output."""
+    if not raw_text or not raw_text.strip():
+        raise ValueError("AI Chef returned an empty response.")
+        
+    text = raw_text.strip()
+    # Remove markdown code fences if present
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\s*```$", "", text, flags=re.MULTILINE).strip()
+    
+    # Try finding outer { ... }
+    data = None
+    m_obj = re.search(r"\{.*\}", text, re.DOTALL)
+    if m_obj:
+        candidate = m_obj.group(0)
+        candidate = re.sub(r",\s*([\]}])", r"\1", candidate)  # strip trailing commas
+        try:
+            data = json.loads(candidate)
+        except Exception:
+            pass
 
-class Recipe(BaseModel):
-    title:        str              = Field(description="A real, well-known dish name (e.g. Shakshuka, Pad Thai, Frittata). NOT an invented name.")
-    character:    str              = Field(description="QUICK, HEARTY, or CREATIVE")
-    time_min:     int              = Field(description="Cook time in minutes")
-    calories_est: int              = Field(description="Calories per serving")
-    difficulty:   str              = Field(description="Easy, Medium, or Hard")
-    uses:         List[str]        = Field(description="Provided ingredients used")
-    missing:      List[MissingItem] = Field(description="Up to 3 missing items")
-    steps:        List[str]        = Field(description="4-8 clear cooking steps")
-    tip:          str              = Field(description="One pro tip")
+    # If { ... } failed, try finding outer [ ... ]
+    if data is None:
+        m_arr = re.search(r"\[.*\]", text, re.DOTALL)
+        if m_arr:
+            candidate = m_arr.group(0)
+            candidate = re.sub(r",\s*([\]}])", r"\1", candidate)
+            try:
+                data = json.loads(candidate)
+            except Exception:
+                pass
 
-class RecipeList(BaseModel):
-    recipes: List[Recipe] = Field(description="Exactly 3 recipes")
+    # If still None, try flattening newlines inside strings
+    if data is None:
+        try:
+            candidate = re.sub(r"[\r\n]+", " ", text)
+            m_retry = re.search(r"\{.*\}", candidate) or re.search(r"\[.*\]", candidate)
+            if m_retry:
+                clean_retry = re.sub(r",\s*([\]}])", r"\1", m_retry.group(0))
+                data = json.loads(clean_retry)
+        except Exception:
+            pass
+
+    if data is None:
+        raise ValueError(f"Could not parse valid JSON from AI response: {raw_text[:200]}")
+
+    # Extract list of recipe dicts
+    recipe_list = []
+    if isinstance(data, dict):
+        for k in ["recipes", "dishes", "recipe_list", "items"]:
+            if k in data and isinstance(data[k], list):
+                recipe_list = data[k]
+                break
+        if not recipe_list:
+            for v in data.values():
+                if isinstance(v, list) and v and isinstance(v[0], dict):
+                    recipe_list = v
+                    break
+    elif isinstance(data, list):
+        recipe_list = data
+
+    if not recipe_list:
+        raise ValueError("AI response did not contain a list of recipes.")
+
+    # Normalize each recipe into standard fields
+    default_chars = ["QUICK", "HEARTY", "CREATIVE"]
+    standardized = []
+    for idx, r in enumerate(recipe_list[:3]):
+        if not isinstance(r, dict):
+            continue
+        title = r.get("title") or r.get("name") or f"Chef Special #{idx+1}"
+        char = str(r.get("character") or default_chars[idx % 3]).upper()
+        if "QUICK" in char: char = "QUICK"
+        elif "HEARTY" in char: char = "HEARTY"
+        elif "CREATIVE" in char: char = "CREATIVE"
+        else: char = default_chars[idx % 3]
+
+        try:
+            time_match = re.search(r"\d+", str(r.get("time_min") or r.get("cooking_time") or 25))
+            time_min = int(time_match.group(0)) if time_match else 25
+        except Exception:
+            time_min = 25
+
+        try:
+            cal_match = re.search(r"\d+", str(r.get("calories_est") or r.get("calories") or 450))
+            calories_est = int(cal_match.group(0)) if cal_match else 450
+        except Exception:
+            calories_est = 450
+
+        difficulty = str(r.get("difficulty") or "Medium").capitalize()
+        
+        uses = r.get("uses") or r.get("ingredients") or []
+        if isinstance(uses, str):
+            uses = [x.strip() for x in re.split(r"[,;]+", uses) if x.strip()]
+        elif isinstance(uses, list):
+            uses = [str(u) for u in uses if u]
+
+        missing_raw = r.get("missing") or []
+        missing = []
+        if isinstance(missing_raw, list):
+            for m in missing_raw:
+                if isinstance(m, dict):
+                    missing.append({"item": str(m.get("item", "")), "swap": str(m.get("swap", ""))})
+                elif isinstance(m, str):
+                    missing.append({"item": m, "swap": ""})
+
+        steps_raw = r.get("steps") or r.get("instructions") or []
+        steps = []
+        if isinstance(steps_raw, list):
+            steps = [str(s).strip() for s in steps_raw if str(s).strip()]
+        elif isinstance(steps_raw, str):
+            steps = [s.strip() for s in re.split(r"[\n\r]+", steps_raw) if s.strip()]
+        if not steps:
+            steps = ["Prepare all ingredients.", "Cook thoroughly in a pan or pot.", "Season to taste and serve warm."]
+
+        tip = str(r.get("tip") or "Serve immediately while fresh and hot.")
+
+        standardized.append({
+            "title": title,
+            "character": char,
+            "time_min": time_min,
+            "calories_est": calories_est,
+            "difficulty": difficulty,
+            "uses": uses,
+            "missing": missing,
+            "steps": steps,
+            "tip": tip
+        })
+
+    if not standardized:
+        raise ValueError("Could not extract individual recipe details.")
+    return standardized
 
 # ── LangChain agent ─────────────────────────────────────────────────────────────
 def generate_recipes(ingredients, cuisine, diet, max_time, servings, kcal_target):
-    parser = PydanticOutputParser(pydantic_object=RecipeList)
     llm = ChatOpenAI(
         model_name=DO_MODEL, openai_api_key=DO_API_KEY,
-        openai_api_base=DO_URL, temperature=0.65, max_tokens=3200)
+        openai_api_base=DO_URL, temperature=0.6, max_tokens=3000)
     ing       = ", ".join(ingredients)
-    kcal_line = f"Each serving ≤ ~{kcal_target} kcal." if kcal_target else ""
-    diet_line = f"Diet: {diet}." if diet != "No restriction" else ""
+    kcal_line = f"Target max ~{kcal_target} kcal per serving." if kcal_target else ""
+    diet_line = f"Dietary preference: {diet}." if diet != "No restriction" else ""
+    
     prompt = ChatPromptTemplate.from_messages([
         ("system",
-         "You are a culinary expert agent. A home cook has: {ingredients}.\n"
-         "Basics assumed: salt, pepper, oil, water, sugar.\n"
-         "Constraints: cuisine={cuisine}. {diet_line} ≤{max_time} min. {servings} servings. {kcal_line}\n\n"
-         "Return 3 DISTINCT real dishes: 1) QUICK (≤20 min), 2) HEARTY (filling), 3) CREATIVE (surprising).\n"
-         "title MUST be a real dish name (e.g. 'Shakshuka', 'Frittata'). No invented names.\n"
-         "uses[] must only include items from the ingredient list above.\n\n"
-         "{format_instructions}"),
-        ("user", "Generate 3 real recipes now.")
+         "You are an expert chef agent. The user has: {ingredients}.\n"
+         "Assume salt, pepper, oil, water are available.\n"
+         "Constraints: Cuisine={cuisine}. {diet_line} Max cook time ≤{max_time} min. Serves {servings}. {kcal_line}\n\n"
+         "Generate 3 distinct real dishes: 1) QUICK (≤20 min), 2) HEARTY, 3) CREATIVE.\n"
+         "title must be a real recognized dish name (e.g. Shakshuka, Frittata, Pad Thai).\n"
+         "uses: array of provided ingredients used.\n"
+         "missing: array of objects with 'item' and 'swap' fields for up to 3 non-staple items.\n"
+         "steps: array of 4-7 concise cooking instructions.\n"
+         "tip: one professional cooking tip.\n\n"
+         "CRITICAL: Output ONLY a valid JSON object with the key 'recipes' containing an array of 3 recipe objects. "
+         "Do NOT include markdown backticks or greetings before/after the JSON."),
+        ("user", "Provide 3 recipes in valid JSON format.")
     ])
-    result = (prompt | llm | parser).invoke({
+    
+    chain = prompt | llm
+    res = chain.invoke({
         "ingredients": ing, "cuisine": cuisine, "diet_line": diet_line,
-        "max_time": max_time, "servings": servings, "kcal_line": kcal_line,
-        "format_instructions": parser.get_format_instructions()
+        "max_time": max_time, "servings": servings, "kcal_line": kcal_line
     })
-    return [r.model_dump() for r in result.recipes]
+    
+    raw_content = res.content if hasattr(res, "content") else str(res)
+    try:
+        return extract_and_parse_recipes(raw_content)
+    except Exception:
+        # One fast fallback repair attempt
+        fix_prompt = ChatPromptTemplate.from_messages([
+            ("system", "Extract and format the recipe information into pure, valid JSON with schema: "
+                       '{"recipes": [{"title": "...", "character": "QUICK", "time_min": 20, "calories_est": 450, "difficulty": "Easy", "uses": ["..."], "missing": [{"item": "...", "swap": "..."}], "steps": ["..."], "tip": "..."}]}. Output JSON ONLY.'),
+            ("user", raw_content[:2500])
+        ])
+        fix_res = (fix_prompt | llm).invoke({})
+        fix_content = fix_res.content if hasattr(fix_res, "content") else str(fix_res)
+        return extract_and_parse_recipes(fix_content)
 
 # ── Audio TTS ───────────────────────────────────────────────────────────────────
 def generate_audio(recipe_idx: int, title: str, steps: list):
     dashscope.api_key = ALIBABA_API_KEY
     text = f"Recipe for {title}. " + " ".join(f"Step {i+1}: {s}" for i, s in enumerate(steps))
     
-    # Singapore/International endpoint first
     endpoints = [
         ("https://dashscope-intl.aliyuncs.com/api/v1", "wss://dashscope-intl.aliyuncs.com/api-ws/v1/inference"),
         ("https://dashscope.aliyuncs.com/api/v1", "wss://dashscope.aliyuncs.com/api-ws/v1/inference")
@@ -233,6 +380,7 @@ _CSS = """
 }
 
 *, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
 
 body, .stApp {
   background-color: var(--bg) !important;
@@ -242,7 +390,7 @@ body, .stApp {
 
 #MainMenu, footer, header[data-testid="stHeader"] { display: none !important; }
 
-/* Constrain width cleanly without empty space */
+/* Constrain width cleanly without empty margins */
 .block-container {
   max-width: 1040px !important;
   padding: 10px 20px 24px !important;
@@ -363,7 +511,7 @@ label[data-testid="stWidgetLabel"] span {
   color: #fff;
 }
 
-/* ── HERO BANNER (SUPER COMPACT) ── */
+/* ── HERO BANNER ── */
 .stage-hero {
   margin-bottom: 12px;
 }
@@ -389,10 +537,7 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   padding: 4px !important;
 }
 
-/* ── FILE UPLOADER COMPACT & STYLED ── */
-div[data-testid="stFileUploader"] {
-  margin-bottom: 0 !important;
-}
+/* ── FILE UPLOADER ── */
 div[data-testid="stFileUploader"] section {
   background: var(--surface) !important;
   border: 2px dashed var(--border) !important;
@@ -515,23 +660,7 @@ div[data-testid="stTabs"] [aria-selected="true"] p {
   color: var(--text) !important;
 }
 
-/* ── RECIPE CARDS (STAGE 3) ── */
-.recipe-card-box {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  overflow: hidden;
-  box-shadow: var(--shadow-sm);
-  display: flex;
-  flex-direction: column;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
-  height: 100%;
-}
-.recipe-card-box:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-md);
-  border-color: var(--accent);
-}
+/* ── BADGES & META ── */
 .recipe-badge-quick {
   background: #FEF3C7;
   color: #B45309 !important;
@@ -681,7 +810,7 @@ div[data-testid="stTabs"] [aria-selected="true"] p {
 st.set_page_config(page_title="FridgeSnap", layout="wide", page_icon="🍳")
 st.markdown(_CSS, unsafe_allow_html=True)
 
-# NAV
+# Top Nav
 st.markdown("""
 <div class="top-nav">
   <div class="brand-group">
@@ -729,6 +858,7 @@ def sync_pills():
 # STAGE 1: Snap or Input
 # ══════════════════════════════════════════════════════════════════════════════
 if stage == 1:
+    auto_scroll("stage-1-anchor")
     st.markdown("""
     <div class="stage-hero">
       <h2>Snap your fridge, cook what's inside.</h2>
@@ -752,6 +882,7 @@ if stage == 1:
 
             if st.session_state.photo:
                 raw, mime = st.session_state.photo
+                auto_scroll("photo-ready-anchor")
                 c_p1, c_p2 = st.columns([1, 1])
                 with c_p1:
                     st.image(raw, width=180, caption="Selected photo")
@@ -809,6 +940,7 @@ if stage == 1:
 # STAGE 2: Confirm Ingredients + Dial In Preferences (Clean 2-Column Grid)
 # ══════════════════════════════════════════════════════════════════════════════
 elif stage == 2:
+    auto_scroll("stage-2-anchor")
     st.markdown("""
     <div class="stage-hero">
       <h2>Confirm ingredients & customize your meal.</h2>
@@ -887,6 +1019,7 @@ elif stage == 2:
 # STAGE 3: Pick Recipe (Side-by-Side 3-Column Display, Zero Scrolling)
 # ══════════════════════════════════════════════════════════════════════════════
 elif stage == 3:
+    auto_scroll("stage-3-anchor")
     st.markdown("""
     <div class="stage-hero">
       <h2>Pick your dish.</h2>
@@ -940,6 +1073,7 @@ elif stage == 3:
 # STAGE 4: Cooking Dashboard (2-Column Tablet Layout)
 # ══════════════════════════════════════════════════════════════════════════════
 elif stage == 4:
+    auto_scroll("stage-4-anchor")
     r = st.session_state.recipes[st.session_state.picked]
     img = st.session_state.get(f"img_{st.session_state.picked}")
     char = r.get("character", "QUICK").upper()
@@ -978,6 +1112,8 @@ elif stage == 4:
                     generate_audio(st.session_state.picked, r.get("title", ""), steps)
 
             if f"audio_{st.session_state.picked}" in st.session_state:
+                auto_scroll("audio-player-anchor")
+                st.markdown("<div id='audio-player-anchor'></div>", unsafe_allow_html=True)
                 st.audio(st.session_state[f"audio_{st.session_state.picked}"], format="audio/mp3")
 
             # Ingredients Breakdown
