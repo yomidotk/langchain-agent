@@ -11,7 +11,7 @@ import dashscope
 from http import HTTPStatus
 from dashscope.audio.tts import SpeechSynthesizer
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import SystemMessage, HumanMessage
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 DO_API_KEY = st.secrets.get("DO_API_KEY", "")
@@ -384,49 +384,48 @@ def generate_recipes(ingredients, cuisine, diet, max_time, servings, kcal_target
             cand_list.append(f"- Title: {c['title']} | Image: {c['thumb']} | Source: {c['source']} | Main Ingredients: {', '.join(c['ingredients'][:6])}")
         candidates_text = "VERIFIED DISHES FROM ONLINE RECIPE SITES WITH REAL PHOTOS:\n" + "\n".join(cand_list)
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system",
-         "You are an expert master chef agent. A home cook has these fridge ingredients: {ingredients}.\n"
-         "Assume salt, pepper, oil, water are available.\n"
-         "Constraints: Cuisine={cuisine}. {diet_line} Max cook time ≤{max_time} min. Serves {servings}. {kcal_line}\n\n"
-         "{candidates_text}\n\n"
-         "Instructions:\n"
-         "Generate exactly 3 distinct, delicious real dishes: 1) QUICK (≤20 min), 2) HEARTY, 3) CREATIVE.\n"
-         "You can adapt or draw directly from the verified online dishes above or well-known authentic recipes.\n"
-         "For each recipe include:\n"
-         "- title: recognizable authentic dish name\n"
-         "- character: QUICK, HEARTY, or CREATIVE\n"
-         "- time_min: minutes to prepare\n"
-         "- calories_est: calories per serving\n"
-         "- difficulty: Easy, Medium, or Hard\n"
-         "- image_url: verified photo URL if matched from online dishes, or empty string\n"
-         "- source_url: link to original recipe site (e.g. BBC Good Food, AllRecipes) if matched, or empty string\n"
-         "- uses: array of user ingredients used\n"
-         "- missing: array of objects with 'item' and 'swap' fields for other needed items\n"
-         "- steps: array of 4-7 concise cooking steps\n"
-         "- tip: one pro cooking tip\n\n"
-         "CRITICAL: Return ONLY a valid JSON object: {{\"recipes\": [...]}}. No markdown backticks, no greeting text."),
-        ("user", "Provide 3 recipes in valid JSON format.")
-    ])
+    system_text = f"""You are an expert master chef agent. A home cook has these fridge ingredients: {ing}.
+Assume salt, pepper, oil, water are available.
+Constraints: Cuisine={cuisine}. {diet_line} Max cook time ≤{max_time} min. Serves {servings}. {kcal_line}
+
+{candidates_text}
+
+Instructions:
+Generate exactly 3 distinct, delicious real dishes: 1) QUICK (≤20 min), 2) HEARTY, 3) CREATIVE.
+You can adapt or draw directly from the verified online dishes above or well-known authentic recipes.
+For each recipe include:
+- title: recognizable authentic dish name
+- character: QUICK, HEARTY, or CREATIVE
+- time_min: minutes to prepare
+- calories_est: calories per serving
+- difficulty: Easy, Medium, or Hard
+- image_url: verified photo URL if matched from online dishes, or empty string
+- source_url: link to original recipe site (e.g. BBC Good Food, AllRecipes) if matched, or empty string
+- uses: array of user ingredients used
+- missing: array of objects with 'item' and 'swap' fields for other needed items
+- steps: array of 4-7 concise cooking steps
+- tip: one pro cooking tip
+
+CRITICAL: Return ONLY a valid JSON object with schema: {{"recipes": [{{"title": "...", "character": "QUICK", "time_min": 20, "calories_est": 450, "difficulty": "Easy", "image_url": "", "source_url": "", "uses": ["..."], "missing": [{{"item": "...", "swap": "..."}}], "steps": ["..."], "tip": "..."}}]}}
+No markdown backticks, no greeting text."""
+
+    messages = [
+        SystemMessage(content=system_text),
+        HumanMessage(content="Provide 3 recipes in valid JSON format.")
+    ]
     
-    chain = prompt | llm
-    res = chain.invoke({
-        "ingredients": ing, "cuisine": cuisine, "diet_line": diet_line,
-        "max_time": max_time, "servings": servings, "kcal_line": kcal_line,
-        "candidates_text": candidates_text
-    })
-    
+    res = llm.invoke(messages)
     raw_content = res.content if hasattr(res, "content") else str(res)
     try:
         recipes = extract_and_parse_recipes(raw_content)
     except Exception:
-        # Fallback repair prompt
-        fix_prompt = ChatPromptTemplate.from_messages([
-            ("system", "Extract and format the recipe information into pure, valid JSON with schema: "
-                       '{"recipes": [{"title": "...", "character": "QUICK", "time_min": 20, "calories_est": 450, "difficulty": "Easy", "image_url": "", "source_url": "", "uses": ["..."], "missing": [{"item": "...", "swap": "..."}], "steps": ["..."], "tip": "..."}]}. Output JSON ONLY.'),
-            ("user", raw_content[:2500])
-        ])
-        fix_res = (fix_prompt | llm).invoke({})
+        # Safe fallback repair prompt using direct messages
+        fix_system = 'Extract and format the recipe information into pure, valid JSON with schema: {"recipes": [{"title": "...", "character": "QUICK", "time_min": 20, "calories_est": 450, "difficulty": "Easy", "image_url": "", "source_url": "", "uses": ["..."], "missing": [{"item": "...", "swap": "..."}], "steps": ["..."], "tip": "..."}]}. Output JSON ONLY.'
+        messages_fix = [
+            SystemMessage(content=fix_system),
+            HumanMessage(content=raw_content[:2500])
+        ]
+        fix_res = llm.invoke(messages_fix)
         fix_content = fix_res.content if hasattr(fix_res, "content") else str(fix_res)
         recipes = extract_and_parse_recipes(fix_content)
 
