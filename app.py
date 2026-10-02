@@ -54,19 +54,30 @@ def detect_ingredients(img_bytes, mime):
                   "temperature": 0.1},
             timeout=120)
         if r.status_code != 200:
-            return None, f"Vision failed (HTTP {r.status_code})"
-        
+            try:
+                err_detail = r.json().get("message") or r.json().get("error", {}).get("message") or r.text[:300]
+            except Exception:
+                err_detail = r.text[:300]
+            return None, f"Vision API error (HTTP {r.status_code}): {err_detail}"
+
         data = r.json()
-        content = data["choices"][0]["message"]["content"] or ""
-        clean = re.sub(r'```(?:json)?', '', content).strip()
+        raw_content = data["choices"][0]["message"]["content"] or ""
+        # content may be a list of blocks (some VL models)
+        if isinstance(raw_content, list):
+            raw_content = " ".join(b.get("text", "") for b in raw_content if isinstance(b, dict))
+        clean = re.sub(r'```(?:json)?', '', raw_content).strip()
         m = re.search(r'\{.*\}', clean, re.DOTALL)
-        out = json.loads(m.group(0) if m else clean)
+        if not m:
+            return None, f"Vision returned no JSON. Raw response: {clean[:300]}"
+        out = json.loads(m.group(0))
+        if out.get("not_food"):
+            return None, "That doesn't look like a fridge photo — try another."
         items = [it for it in out.get("ingredients", []) if isinstance(it, dict) and it.get("name")]
         if not items:
-            return None, "Couldn't spot any ingredients."
+            return None, f"No ingredients found. Raw model output: {clean[:300]}"
         return items, ""
     except Exception as e:
-        return None, f"Vision error: {str(e)[:220]}"
+        return None, f"Vision error: {str(e)[:300]}"
 
 # ================= LANGCHAIN AGENT (RECIPES) =================
 class MissingIngredient(BaseModel):
@@ -139,10 +150,10 @@ _CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Sora:wght@400;600;700;800&display=swap');
 
 :root {
-  --bg: #fff; --bg2: #F9FAFB; --bg3: #F3F4F6;
-  --border: #E5E7EB; --border2: #D1D5DB;
-  --text: #0A0A0A; --text2: #374151; --text3: #6B7280; --text4: #9CA3AF;
-  --green: #059669;
+  --bg: #FFFCF7; --bg2: #F6F1E7; --bg3: #EDE4D6;
+  --border: #DDD5C5; --border2: #C9BBA8;
+  --text: #1D1A16; --text2: #3D382F; --text3: #8A7F70; --text4: #B5A898;
+  --green: #2E7D4F; --green-light: #E3EFE7;
 }
 *,*::before,*::after{box-sizing:border-box;}
 *{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif!important;}
