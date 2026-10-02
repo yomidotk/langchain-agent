@@ -200,35 +200,35 @@ html { scroll-behavior:smooth; }
 section[data-testid="stSidebar"] { display:none!important; }
 
 /* ── NAV ── */
-.nav { display:flex; align-items:center; gap:12px; padding:26px 0 10px; border-bottom:1px solid var(--border); margin-bottom:36px; }
-.logo-icon { width:36px;height:36px;border-radius:10px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 3px 10px rgba(196,84,30,.25); }
-.brand-name { font-family:'Lora',serif!important; font-weight:700; font-size:21px; letter-spacing:-.02em; color:var(--text); }
+.nav { display:flex; align-items:center; gap:10px; padding:18px 0 8px; border-bottom:1px solid var(--border); margin-bottom:24px; }
+.logo-icon { width:32px;height:32px;border-radius:9px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:16px;box-shadow:0 2px 8px rgba(196,84,30,.22); }
+.brand-name { font-family:'Lora',serif!important; font-weight:700; font-size:19px; letter-spacing:-.02em; color:var(--text); }
 .brand-name span { color:var(--accent); }
-.agent-tag { font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--text3);background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:4px 10px; }
+.agent-tag { font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--text3);background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:3px 9px; }
 
 /* ── PROGRESS ── */
-.progress { display:flex; align-items:center; gap:0; margin-bottom:40px; }
-.prog-step { display:flex; align-items:center; gap:8px; flex:1; }
-.prog-num { width:28px;height:28px;border-radius:50%;border:2px solid var(--border2);background:var(--bg);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--text3);flex-shrink:0;transition:all .3s; }
-.prog-label { font-size:12px;font-weight:600;color:var(--text3); }
-.prog-line { flex:1;height:1px;background:var(--border);margin:0 8px; }
-.prog-step.active .prog-num { background:var(--accent);border-color:var(--accent);color:#fff;box-shadow:0 2px 8px rgba(196,84,30,.3); }
+.progress { display:flex; align-items:center; gap:0; margin-bottom:28px; }
+.prog-step { display:flex; align-items:center; gap:7px; flex:1; }
+.prog-num { width:24px;height:24px;border-radius:50%;border:2px solid var(--border2);background:var(--bg);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--text3);flex-shrink:0;transition:all .3s; }
+.prog-label { font-size:11px;font-weight:600;color:var(--text3); }
+.prog-line { flex:1;height:1px;background:var(--border);margin:0 6px; }
+.prog-step.active .prog-num { background:var(--accent);border-color:var(--accent);color:#fff;box-shadow:0 2px 6px rgba(196,84,30,.3); }
 .prog-step.active .prog-label { color:var(--accent);font-weight:700; }
 .prog-step.done .prog-num { background:var(--green);border-color:var(--green);color:#fff; }
 .prog-step.done .prog-label { color:var(--green); }
 
 /* ── HERO ── */
-.hero { margin-bottom:36px; }
-.hero-eyebrow { font-size:11px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:var(--accent);margin-bottom:12px; }
-.hero h1 { font-family:'Lora',serif!important; font-size:clamp(2.2rem,6vw,3.4rem); font-weight:700; line-height:1.1; letter-spacing:-.02em; color:var(--text); margin:0 0 14px; }
+.hero { margin-bottom:24px; }
+.hero-eyebrow { font-size:10px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:var(--accent);margin-bottom:8px; }
+.hero h1 { font-family:'Lora',serif!important; font-size:clamp(1.7rem,4vw,2.4rem); font-weight:700; line-height:1.15; letter-spacing:-.02em; color:var(--text)!important; margin:0 0 10px; }
 .hero h1 em { font-style:italic; color:var(--accent); }
-.hero p { font-size:15.5px; color:var(--text3); line-height:1.75; max-width:500px; }
+.hero p { font-size:14px; color:var(--text3)!important; line-height:1.7; max-width:480px; }
 
 /* ── CARDS ── */
-.card { background:var(--card); border:1px solid var(--border); border-radius:20px; padding:28px 32px; margin-bottom:16px; box-shadow:0 2px 16px rgba(0,0,0,.04); }
-.card-kicker { font-size:11px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:8px; }
-.card-title { font-family:'Lora',serif!important; font-size:18px;font-weight:700;color:var(--text);margin-bottom:6px; }
-.card-sub { font-size:14px;color:var(--text3);line-height:1.6; }
+.card { background:var(--card); border:1px solid var(--border); border-radius:16px; padding:20px 24px; margin-bottom:14px; box-shadow:0 2px 12px rgba(0,0,0,.04); }
+.card-kicker { font-size:10px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:6px; }
+.card-title { font-family:'Lora',serif!important; font-size:16px;font-weight:700;color:var(--text)!important;margin-bottom:5px; }
+.card-sub { font-size:13px;color:var(--text3)!important;line-height:1.55; }
 
 /* ── BUTTONS ── */
 div[data-testid="stButton"] button { background:var(--accent)!important;color:#fff!important;border:none!important;border-radius:12px!important;padding:14px 24px!important;font-size:14px!important;font-weight:700!important;letter-spacing:-.01em!important;box-shadow:0 3px 12px rgba(196,84,30,.22)!important;transition:all .15s!important; }
@@ -313,13 +313,25 @@ div[data-testid="stAudio"] { margin-top:16px;border-radius:12px;overflow:hidden;
 .shop-swap { font-size:12.5px;color:var(--text4);margin-left:auto; }
 
 /* ── MISC STREAMLIT ── */
-.stAlert { border-radius:12px!important; }
-div[data-testid="stSlider"] { accent-color:var(--accent); }
-.footer { text-align:center;color:var(--text4);font-size:12.5px;margin-top:80px;padding:24px 0;border-top:1px solid var(--border);line-height:1.7; }
+.stAlert { border-radius:10px!important; }
+div[data-testid=\"stSlider\"] { accent-color:var(--accent); }
+div[data-testid=\"stMarkdownContainer\"] p { color:var(--text2)!important; }
+div[data-testid=\"stMarkdownContainer\"] h1,div[data-testid=\"stMarkdownContainer\"] h2,div[data-testid=\"stMarkdownContainer\"] h3 { color:var(--text)!important; }
+
+/* ── FILE UPLOADER ── */
+div[data-testid=\"stFileUploader\"] section { border:2px dashed var(--border2)!important;border-radius:12px!important;background:var(--surface)!important;padding:18px!important; }
+div[data-testid=\"stFileUploader\"] section:hover { border-color:var(--accent)!important; }
+div[data-testid=\"stFileUploaderDropzone\"] { border:none!important;background:transparent!important; }
+div[data-testid=\"stFileUploaderDropzone\"] p,div[data-testid=\"stFileUploaderDropzone\"] span { color:var(--text3)!important;font-size:13px!important; }
+div[data-testid=\"stFileUploaderDropzone\"] small { color:var(--text4)!important; }
+div[data-testid=\"stFileUploaderDropzoneInstructions\"] span { color:var(--text3)!important;font-size:13px!important; }
+button[data-testid=\"baseButton-secondary\"] { color:var(--accent)!important;background:transparent!important;border:1px solid var(--accent)!important;font-size:12.5px!important;border-radius:8px!important;padding:6px 14px!important;font-weight:600!important; }
+
+.footer { text-align:center;color:var(--text4);font-size:12px;margin-top:60px;padding:20px 0;border-top:1px solid var(--border);line-height:1.7; }
 
 @media(max-width:640px){
-  .card,.recipe-detail-body{padding:20px;}
-  .hero h1{font-size:2.1rem;}
+  .card,.recipe-detail-body{padding:16px;}
+  .hero h1{font-size:1.7rem;}
 }
 </style>
 """
@@ -392,9 +404,12 @@ if stage == 1:
 
     if st.session_state.photo:
         raw, mime = st.session_state.photo
-        st.markdown(f'<div class="photo"><img src="data:{mime};base64,{base64.b64encode(raw).decode()}"></div>', unsafe_allow_html=True)
-        c1, c2 = st.columns([3, 1])
-        with c1:
+        # Small thumbnail — use native st.image to avoid Streamlit CSP blocking
+        col_img, col_btns = st.columns([1, 1])
+        with col_img:
+            st.image(raw, width=300, caption="Your fridge")
+        with col_btns:
+            st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
             if st.button("🔍 Scan with AI →", use_container_width=True):
                 with st.spinner("Vision model scanning your fridge…"):
                     small, mime2 = prep_image(raw, mime)
@@ -406,8 +421,7 @@ if stage == 1:
                     st.session_state.confirmed = [it["name"] for it in items if it.get("confidence") != "low"]
                     st.session_state.stage     = 2
                     st.rerun()
-        with c2:
-            if st.button("Clear", type="secondary", use_container_width=True):
+            if st.button("🗑 Remove photo", type="secondary", use_container_width=True):
                 st.session_state.photo = None
                 st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
@@ -496,10 +510,8 @@ elif stage == 3:
         icon = char_icons.get(char, "🍽")
         img  = st.session_state.get(f"img_{idx}")
 
-        img_html = f'<img class="recipe-pick-img" src="{img}" onerror="this.style.display=\'none\'">' if img else '<div style="width:100%;height:140px;background:var(--surface);"></div>'
         st.markdown(f"""
 <div class="recipe-pick">
-  {img_html}
   <div class="recipe-pick-body">
     <div class="recipe-pick-char">{icon} {html.escape(char)}</div>
     <div class="recipe-pick-title">{html.escape(r.get('title',''))}</div>
@@ -507,14 +519,20 @@ elif stage == 3:
       <div class="meta-chip">⏱ {r.get('time_min','?')} min</div>
       <div class="meta-chip">🔥 {r.get('calories_est','?')} kcal</div>
       <div class="meta-chip">👨‍🍳 {html.escape(str(r.get('difficulty','')))}</div>
-      <div class="meta-chip">Uses {len(r.get('uses',[]))}/{max(len(st.session_state.confirmed),1)} ingredients</div>
+      <div class="meta-chip">Uses {len(r.get('uses',[]))}/{max(len(st.session_state.confirmed),1)} ingr.</div>
     </div>
   </div>
 </div>""", unsafe_allow_html=True)
-        if st.button(f"Cook this → {r.get('title','')[:30]}", key=f"pick_{idx}", use_container_width=True):
+        if img:
+            try:
+                st.image(img, use_container_width=True)
+            except Exception:
+                pass
+        if st.button(f"Cook this → {r.get('title','')[:32]}", key=f"pick_{idx}", use_container_width=True):
             st.session_state.picked = idx
             st.session_state.stage  = 4
             st.rerun()
+        st.markdown("<hr style='border:none;border-top:1px solid var(--border);margin:4px 0 14px'>", unsafe_allow_html=True)
 
     if st.button("← Back to preferences", type="secondary"):
         st.session_state.stage = 2
@@ -537,7 +555,10 @@ elif stage == 4:
     # Big image + card
     st.markdown('<div class="recipe-detail">', unsafe_allow_html=True)
     if img:
-        st.markdown(f'<img class="recipe-hero-img" src="{img}" onerror="this.style.display=\'none\'">', unsafe_allow_html=True)
+        try:
+            st.image(img, use_container_width=True)
+        except Exception:
+            pass
     st.markdown(f"""<div class="recipe-detail-body">
   <div class="recipe-char-tag">{icon} {html.escape(char)}</div>
   <div class="recipe-detail-title">{html.escape(r.get('title',''))}</div>
