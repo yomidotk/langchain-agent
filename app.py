@@ -1,3 +1,13 @@
+"""HypeRepo — fresh rewrite (2026-10-02).
+Paste a GitHub URL, get:
+  1. The short version (TL;DR)
+  2. A how-it-works diagram (Mermaid flowchart, rendered as a clean image)
+  3. A plain-English explanation of the repo
+  4. An audio explainer with its script shown separately
+  5. 4 Instagram hook images (text-based, B&W) + captions + hashtags
+Prompting follows a research-backed playbook: strict JSON blocks, grounded roles,
+concreteness rules, pre-assigned non-overlapping angles, one rubric-scored critique pass.
+"""
 import os
 import re
 import json
@@ -6,90 +16,49 @@ import time
 import asyncio
 import base64
 import tempfile
+
 import requests
 import edge_tts
 import streamlit as st
-from typing import TypedDict, List, Dict
-from langgraph.graph import StateGraph, END
 
-st.set_page_config(page_title="HypeRepo — AI Marketing Agent", page_icon="⚡", layout="wide")
-
-def get_secret(name):
-    try:
-        return st.secrets[name]
-    except Exception:
-        return os.environ.get(name)
-
-DO_API_KEY = get_secret("DO_API_KEY")
-ALIBABA_API_KEY = get_secret("ALIBABA_API_KEY")
+# ================= CONFIG =================
+DO_API_KEY = st.secrets.get("DO_API_KEY", "")
+ALIBABA_API_KEY = st.secrets.get("ALIBABA_API_KEY", "")
 DO_URL = "https://inference.do-ai.run/v1/responses"
 DO_MODEL = "openai-gpt-oss-20b"
+QWEN_URL = "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+QWEN_MODEL = "qwen-image-max"
 
-# ================= BACKEND PIPELINE (the brain) =================
-# Voice settings — swap VOICE for any en-US voice name, e.g. "en-US-AvaMultilingualNeural"
 VOICE = "en-US-AndrewMultilingualNeural"
 VOICE_FALLBACK = "en-US-RogerNeural"
 
-def _clean_spoken(text):
-    """Strip URLs/links/domains so the voiceover never reads 'https colon slash slash' aloud."""
-    t = re.sub(r"\[([^\]]+)\]\(\s*https?://\S+\s*\)", r"\1", text or "")
-    t = re.sub(r"https?://\S+", "", t)
-    t = re.sub(r"\bwww\.\S+", "", t)
-    # bare domains the model sometimes writes: github.com/owner/repo, mysite.io
-    t = re.sub(r"\b(?:[a-zA-Z0-9-]+\.)+(?:com|io|dev|app|net|org|ai|co|me|site|page|link|gg|ly|to|so|xyz|tech)\b\S*", "", t)
-    # stray fragments left behind: "www.", or a lone "http"/"https"
-    t = re.sub(r"\bwww\.(?=\s|$)", "", t)
-    t = re.sub(r"\bhttps?\b", "", t)
-    return re.sub(r"\s+", " ", t).strip()
+STRICT_JSON = """
+OUTPUT RULES (follow exactly):
+- Return STRICT JSON ONLY. No prose before or after, no markdown fences, no comments.
+- Double quotes on all keys and strings. No trailing commas.
+- Include every required field. If a field is truly unknown, use "" or [] — never invent a value.
+- Your response must start with { and end with }."""
 
-def _to_ssml(text, voice):
-    """Light SSML: a dramatic pause after the hook + breathing room between paragraphs,
-    so the delivery has pacing instead of one flat robot run-on."""
-    text = _clean_spoken(text)
-    paras = [html.escape(" ".join(p.split())) for p in text.split("\n\n") if p.strip()]
-    body = '<break time="600ms"/>'.join(paras)
-    body = re.sub(r"([.!?])\s+", r'\1<break time="450ms"/>', body, count=1)
-    return (f"<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>"
-            f"<voice name='{voice}'><prosody rate='+0%'>{body}</prosody></voice></speak>")
+REJECT_WORDS = ("revolutionary", "game-changing", "game changing", "cutting-edge",
+                "cutting edge", "seamless", "powerful", "unlock", "elevate",
+                "delve", "tapestry", "furthermore")
 
-def _synth(text, out_path, voice):
-    try:
-        ssml = _to_ssml(text, voice)
-        async def _main():
-            await edge_tts.Communicate(ssml, voice=voice).save(out_path)
-        asyncio.run(_main())
-        if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
-            return "TTS finished but produced no audio file"
-        return None
-    except Exception as e:
-        return f"{type(e).__name__}: {e}"
-
-def tts_to_mp3(text, out_path, voice=VOICE):
-    """Returns None on success, or an error string on failure. Never raises,
-    so one bad voiceover can't silently kill the whole bundle."""
-    if not (text or "").strip():
-        return "empty script — nothing to narrate"
-    err = _synth(text, out_path, voice)
-    if err and voice != VOICE_FALLBACK:
-        err = _synth(text, out_path, VOICE_FALLBACK)
-    return err
-
+# ================= LLM =================
 def do_call(prompt, max_tokens, temperature, _tries=3):
-    """Call the LLM and return parsed JSON. Retries up to _tries times with
-    escalating token limits (the old single retry reused the same limit, so a
-    truncated response failed twice identically). Raises RuntimeError with a
-    clear message if the model keeps returning garbage — the caller decides
-    how to surface it instead of crashing with a bare JSONDecodeError."""
+    """Call the LLM and return parsed JSON. 3 attempts, escalating token limits,
+    brief pauses between retries, clear RuntimeError if the model keeps flaking."""
     original = prompt
     last_err = None
     for attempt in range(_tries):
         tok = int(max_tokens * (1.6 ** attempt))
         if attempt > 0:
-            time.sleep(2 * attempt)  # brief breather for transient flops
-        response = requests.post(DO_URL,
+            time.sleep(2 * attempt)
+        response = requests.post(
+            DO_URL,
             headers={"Authorization": f"Bearer {DO_API_KEY}", "Content-Type": "application/json"},
             json={"model": DO_MODEL, "input": prompt, "max_output_tokens": tok,
-                  "temperature": temperature, "stream": False}, timeout=180)
+                  "temperature": temperature, "stream": False},
+            timeout=180)
         response.raise_for_status()
         res_data = response.json()
         raw_content = ""
@@ -122,390 +91,581 @@ def do_call(prompt, max_tokens, temperature, _tries=3):
                 prompt = original + "\n\nRespond with valid JSON only, no other text."
     raise RuntimeError(f"AI returned invalid JSON after {_tries} tries ({last_err})")
 
-class AgentState(TypedDict):
-    repo_url: str; out_dir: str; readme_text: str; repo_context: str; code_context: str
-    concept_brief: Dict; pitch_cards: List[Dict]; social_posts: List[Dict]
+# ================= SPEECH =================
+def _clean_spoken(text):
+    """Strip URLs/links/domains so the voiceover never reads them aloud."""
+    t = re.sub(r"\[([^\]]+)\]\(\s*https?://\S+\s*\)", r"\1", text or "")
+    t = re.sub(r"https?://\S+", "", t)
+    t = re.sub(r"\bwww\.\S+", "", t)
+    t = re.sub(r"\b(?:[a-zA-Z0-9-]+\.)+(?:com|io|dev|app|net|org|ai|co|me|site|page|link|gg|ly|to|so|xyz|tech)\b\S*", "", t)
+    t = re.sub(r"\bwww\.(?=\s|$)", "", t)
+    t = re.sub(r"\bhttps?\b", "", t)
+    return re.sub(r"\s+", " ", t).strip()
 
-CODE_EXTS = (".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".rb", ".php", ".swift", ".kt")
-SKIP_DIRS = {"node_modules", ".git", "dist", "build", "__pycache__", ".next", "vendor", ".idea", ".vscode"}
+def _to_ssml(text, voice):
+    """Light SSML: pause after the hook + breathing room between paragraphs."""
+    text = _clean_spoken(text)
+    paras = [html.escape(" ".join(p.split())) for p in text.split("\n\n") if p.strip()]
+    if not paras:
+        paras = [html.escape(" ".join(text.split()))]
+    body = '<break time="600ms"/>'.join(paras)
+    first_end = body.find(". ")
+    if first_end != -1:
+        body = body[:first_end + 1] + '<break time="450ms"/>' + body[first_end + 1:]
+    return f'<speak version="1.0" xml:lang="en-US"><voice name="{voice}"><prosody rate="+0%">{body}</prosody></voice></speak>'
 
-# Files that look like code but tell us nothing about what the project DOES
-JUNK_PARTS = (".config.", "config.", ".d.ts", ".pyi", ".min.js", ".min.css",
-              "_test.", ".test.", ".spec.", "test_", "__tests__", "mock", "fixture")
-ENTRY_HINTS = ("main", "index", "app", "cli", "server", "__main__")
-
-def _is_junk(name):
-    n = name.lower()
-    return n.startswith("builtins") or any(p in n for p in JUNK_PARTS)
-
-def _rank(name):
-    n = name.lower()
-    return (_is_junk(n), not any(h in n for h in ENTRY_HINTS), n)
-
-def _raw(owner, repo, branch, path):
+def _tts_bytes(ssml_text, voice):
+    async def _run():
+        communicate = edge_tts.Communicate(ssml=ssml_text, voice=voice)
+        chunks = []
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                chunks.append(chunk["data"])
+        return b"".join(chunks)
     try:
-        r = requests.get(f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}", timeout=15)
-        if r.status_code == 200 and r.text.strip():
-            return r.text
-    except Exception:
-        pass
-    return ""
-
-def fetch_repo(state: AgentState):
-    m = re.search(r"https?://github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+)", state["repo_url"])
-    if not m:
-        raise ValueError("Could not parse GitHub repo URL")
-    owner, repo = m.group(1), m.group(2)
-    r = requests.get(f"https://raw.githubusercontent.com/{owner}/{repo}/main/README.md", timeout=30)
-    if r.status_code != 200:
-        r = requests.get(f"https://raw.githubusercontent.com/{owner}/{repo}/master/README.md", timeout=30)
-    readme = r.text[:4000] if r.status_code == 200 else ""
-    meta, tree, manifest = "", "", ""
-    code_chunks = []
-    def grab(path):
-        for br in ("main", "master"):
-            t = _raw(owner, repo, br, path)
-            if t:
-                code_chunks.append(f"--- {path} ---\n{t[:2000]}")
-                return True
-        return False
-    try:
-        meta_r = requests.get(f"https://api.github.com/repos/{owner}/{repo}", timeout=20).json()
-        meta = (f"{meta_r.get('description', '')} | stars: {meta_r.get('stargazers_count', '?')} "
-                f"| lang: {meta_r.get('language', '?')} | topics: {', '.join(meta_r.get('topics', [])[:8])}")
-    except Exception:
-        pass
-    try:
-        top = requests.get(f"https://api.github.com/repos/{owner}/{repo}/contents/", timeout=20).json()
-        items = top if isinstance(top, list) else []
-        tree = ", ".join(x.get("name", "") for x in items[:30])
-        cands = [x["name"] for x in items if x.get("type") == "file" and x["name"].lower().endswith(CODE_EXTS)]
-        cands.sort(key=_rank)
-        for name in cands[:4]:
-            grab(name)
-        subdirs = [x["name"] for x in items if x.get("type") == "dir" and x["name"] not in SKIP_DIRS]
-        for sd in ["src", "lib", "app", "pkg", "components"]:
-            if sd in subdirs:
-                try:
-                    sub = requests.get(f"https://api.github.com/repos/{owner}/{repo}/contents/{sd}", timeout=20).json()
-                    if isinstance(sub, list):
-                        sfiles = sorted(
-                            (x["name"] for x in sub
-                             if x.get("type") == "file" and x["name"].lower().endswith(CODE_EXTS)),
-                            key=_rank)[:3]
-                        for name in sfiles:
-                            if len(code_chunks) >= 7:
-                                break
-                            grab(f"{sd}/{name}")
-                except Exception:
-                    pass
-                break
-    except Exception:
-        pass
-    for mf in ["package.json", "pyproject.toml", "setup.py", "Cargo.toml", "go.mod"]:
-        t = _raw(owner, repo, "main", mf) or _raw(owner, repo, "master", mf)
-        if t and len(t) > 50:
-            manifest = f"[{mf}]\n{t[:1200]}"
-            break
-    return {"readme_text": readme,
-            "repo_context": f"META: {meta}\nFILES: {tree}\n{manifest}",
-            "code_context": "\n\n".join(code_chunks)}
-
-
-def understand_project(state: AgentState):
-    prompt = f"""You are a senior staff engineer doing technical due diligence on an open-source project.
-Read the README, repo metadata, and source code excerpts below and explain the project like you truly understand it.
-
-REPO: {state['repo_url']}
-{state['repo_context']}
-
-README:
-{state['readme_text']}
-
-SOURCE CODE EXCERPTS:
-{state['code_context']}
-
-Output ONLY a valid JSON object matching this exact schema:
-{{"one_liner": "what it is, in one punchy sentence",
-"concept": "2-3 sentences: the core idea, explained simply",
-"how_it_works": "3-5 sentences, technically concrete: what the user actually does step by step, and what the code does under the hood",
-"key_features": ["concrete feature with a specific detail", "up to 6 total, most impressive first"],
-"audience": "who this is for, specifically",
-"differentiator": "what makes it different from alternatives — or 'not clear from context' if honestly unknown",
-"vibe": "the project's personality/aesthetic in ~5 words"}}
-RULES: Only state what the context supports. Be concrete: name real commands, file types, behaviors from the code — never generic filler."""
-    brief = do_call(prompt, max_tokens=1500, temperature=0.2)
-    # Focused second pass — the main brief often drops these fields, so ask directly.
-    # The small model sometimes returns empty arrays; don't accept that silently —
-    # push back firmly, and only flag failure if it still refuses after retries.
-    try:
-        review_prompt = (
-            "You are a blunt senior engineer reviewing an open-source project. Context:\n"
-            + json.dumps(brief, indent=1)[:4000] +
-            "\nReturn ONLY valid JSON: {\"strengths\": [\"3-4 concrete strengths grounded in the context\"], "
-            "\"weaknesses\": [\"3-4 honest weaknesses, limitations, or missing pieces visible from the context\"]}. "
-            "Be specific and technical — e.g. 'has zero tests', 'README lacks a usage example', "
-            "'setup needs 5 manual steps'. Never vague filler like 'could be more popular'. "
-            "Empty arrays are not acceptable — every real codebase has both strengths and weaknesses.")
-        review = {}
-        nudge = ("\nYour last response had empty strengths/weaknesses. Look again at the file tree, "
-                 "README and code patterns in the context above and name specifics. "
-                 "Respond with the full JSON, no empty arrays.")
-        for attempt in range(3):
-            review = do_call(review_prompt + ("" if attempt == 0 else nudge),
-                             max_tokens=600, temperature=0.3)
-            if review.get("strengths") or review.get("weaknesses"):
-                break
-        brief["strengths"] = [str(s) for s in review.get("strengths", [])][:4]
-        brief["weaknesses"] = [str(s) for s in review.get("weaknesses", [])][:4]
-        if not brief["strengths"] and not brief["weaknesses"]:
-            brief["_review_failed"] = True
-    except Exception:
-        brief["_review_failed"] = True
-    return {"concept_brief": brief}
-
-def draft_strategy(state: AgentState):
-    brief_text = json.dumps(state["concept_brief"], indent=1)
-    posts_prompt = f"""You are a senior product marketer who writes scroll-stopping launch content for developer tools.
-You already understand the project deeply. Concept brief:
-{brief_text}
-RULES:
-- Every claim must come from the brief. NEVER invent features, stats, integrations, or testimonials.
-- Concrete nouns only. BANNED: revolutionary, game-changing, cutting-edge, unlock, supercharge, seamless.
-- HOOKS name a painful problem or open a curiosity loop. Max 8 words.
-- Short SCRIPTS are SPOKEN WORD: contractions, short sentences, 25-35 words, end with a call to action.
-- SCRIPTS must never contain URLs, links, domains (not even "github.com/owner/repo"), or the words "https"/"www" — say "link in bio" or "link below" instead.
-- IMAGE PROMPTS are self-contained prompts for a square 1:1 social promo graphic depicting THIS project's actual subject matter (never generic laptops/robots/tech wallpaper). MUST include the exact on-image headline in "quotes" (max 5 words), describe scene, composition, style, lighting, colors, and end with: "No watermark, no extra text, no garbled letters."
-Output ONLY a valid JSON object matching this exact schema:
-{{"pitch_cards": [{{"headline": "punchy benefit, max 6 words", "sub": "one concrete sentence with a real feature or proof point"}}, {{"headline": "...", "sub": "..."}}, {{"headline": "...", "sub": "..."}}],
-"social_posts": [{{"hook": "scroll-stopper, max 8 words", "script": "25-35 word spoken script: hook, one concrete capability, call to action", "image_prompt": "full image generation prompt per the rules above", "caption": "post caption: hook line, 2-3 value lines, call to action", "hashtags": ["#tag1", "#tag2", "#tag3"]}}, {{"hook": "...", "script": "...", "image_prompt": "...", "caption": "...", "hashtags": ["#tag1", "#tag2", "#tag3"]}}, {{"hook": "...", "script": "...", "image_prompt": "...", "caption": "...", "hashtags": ["#tag1", "#tag2", "#tag3"]}}]}}
-The 3 posts cover 3 angles IN ORDER: 1) the painful problem, 2) the magic moment of using it, 3) proof + call to action (star the repo)."""
-    package = do_call(posts_prompt, max_tokens=4000, temperature=0.3)
-    cards = package.get("pitch_cards", [])
-    norm_cards = [c if isinstance(c, dict) else {"headline": str(c), "sub": ""} for c in cards]
-    return {"pitch_cards": norm_cards, "social_posts": package.get("social_posts", [])}
-
-def generate_assets(state: AgentState):
-    out_dir = state["out_dir"]
-    posts = state["social_posts"]
-    for i, post in enumerate(posts):
-        audio_path = os.path.join(out_dir, f"post_{i}.mp3")
-        script = _clean_spoken(post.get("script", ""))
-        post["script"] = script  # keep displayed script identical to what the voice says
-        a_err = tts_to_mp3(script, audio_path)
-        if a_err:
-            post["audio_path"] = None
-            post["audio_error"] = a_err
-        else:
-            post["audio_path"] = audio_path
-            post["audio_error"] = None
+        return asyncio.run(_run())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
         try:
-            img_rsp = requests.post(
-                "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
-                headers={"Authorization": f"Bearer {ALIBABA_API_KEY}", "Content-Type": "application/json"},
-                json={"model": "qwen-image-max",
-                      "input": {"messages": [{"role": "user", "content": [{"text": post["image_prompt"]}]}]},
-                      "parameters": {"size": "1328*1328", "n": 1, "prompt_extend": True, "watermark": False}},
-                timeout=180)
-            img_data = img_rsp.json()
-            if img_rsp.status_code != 200:
-                raise RuntimeError(f"Alibaba error {img_rsp.status_code}: {img_data.get('message', img_rsp.text)}")
-            img_url = None
-            for block in img_data["output"]["choices"][0]["message"]["content"]:
-                if isinstance(block, dict) and "image" in block:
-                    img_url = block["image"]
-                    break
-            if not img_url:
-                raise RuntimeError(f"No image in response: {img_data}")
-            img_path = os.path.join(out_dir, f"post_{i}.png")
-            if img_url.startswith("data:"):
-                _, b64data = img_url.split(",", 1)
-                with open(img_path, "wb") as f:
-                    f.write(base64.b64decode(b64data))
-            else:
-                img_res = requests.get(img_url, timeout=60)
-                img_res.raise_for_status()
-                with open(img_path, "wb") as f:
-                    f.write(img_res.content)
-            post["img_path"] = img_path
-            post["img_error"] = None
+            return loop.run_until_complete(_run())
+        finally:
+            loop.close()
+
+def make_audio(script):
+    """Returns (mp3_bytes, error_str). Never raises."""
+    script = _clean_spoken(script)
+    if not script:
+        return None, "empty script"
+    last_err = ""
+    for voice in (VOICE, VOICE_FALLBACK):
+        try:
+            data = _tts_bytes(_to_ssml(script, voice), voice)
+            if data:
+                return data, ""
+            last_err = f"{voice}: empty audio"
         except Exception as e:
-            post["img_path"] = None
-            post["img_error"] = str(e)
-    return {"social_posts": posts}
+            last_err = f"{voice}: {str(e)[:120]}"
+    return None, last_err or "TTS failed"
 
-workflow = StateGraph(AgentState)
-workflow.add_node("fetch_repo", fetch_repo)
-workflow.add_node("understand_project", understand_project)
-workflow.add_node("draft_strategy", draft_strategy)
-workflow.add_node("generate_assets", generate_assets)
-workflow.set_entry_point("fetch_repo")
-workflow.add_edge("fetch_repo", "understand_project")
-workflow.add_edge("understand_project", "draft_strategy")
-workflow.add_edge("draft_strategy", "generate_assets")
-workflow.add_edge("generate_assets", END)
-video_agent = workflow.compile()
+# ================= IMAGES (Alibaba Qwen only) =================
+def qwen_image(prompt):
+    """Returns (png_bytes, error_str). Qwen only, no fallbacks. Never raises."""
+    try:
+        resp = requests.post(
+            QWEN_URL,
+            headers={"Authorization": f"Bearer {ALIBABA_API_KEY}", "Content-Type": "application/json"},
+            json={"model": QWEN_MODEL,
+                  "input": {"messages": [{"role": "user",
+                                           "content": [{"text": prompt}]}]},
+                  "parameters": {"size": "1328*1328", "n": 1}},
+            timeout=180)
+    except Exception as e:
+        return None, f"request failed: {str(e)[:150]}"
+    if resp.status_code != 200:
+        return None, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    try:
+        data = resp.json()
+    except Exception:
+        return None, "non-JSON response"
+    out = (data.get("output") or {})
+    results = out.get("results") or []
+    if not results:
+        return None, f"no results: {json.dumps(data)[:200]}"
+    url = results[0].get("url", "")
+    if url.startswith("data:"):
+        try:
+            return base64.b64decode(url.split(",", 1)[1]), ""
+        except Exception as e:
+            return None, f"bad data URL: {str(e)[:100]}"
+    if url.startswith("http"):
+        try:
+            r = requests.get(url, timeout=60)
+            if r.status_code == 200 and r.content:
+                return r.content, ""
+            return None, f"download HTTP {r.status_code}"
+        except Exception as e:
+            return None, f"download failed: {str(e)[:120]}"
+    return None, f"unexpected result: {json.dumps(results[0])[:200]}"
 
-STEPS = [("fetch_repo", "📥", "Reading repo"),
-         ("understand_project", "🔬", "Understanding project"),
-         ("draft_strategy", "🧠", "Writing copy"),
-         ("generate_assets", "🎨", "Images + voiceovers")]
+# ================= DIAGRAM (Mermaid -> image) =================
+def mermaid_image_url(code):
+    b64 = base64.urlsafe_b64encode(code.encode("utf-8")).decode()
+    return f"https://mermaid.ink/img/{b64}?theme=neutral"
+
+def fetch_diagram(code):
+    """Returns (png_bytes, error_str). Falls back gracefully; caller shows steps instead."""
+    code = re.sub(r'```(?:mermaid)?', '', code or "").strip()
+    if "flowchart" not in code and "graph" not in code:
+        return None, "model did not return flowchart code"
+    try:
+        r = requests.get(mermaid_image_url(code), timeout=30)
+        if r.status_code == 200 and r.content[:4] == b"\x89PNG":
+            return r.content, ""
+        return None, f"render HTTP {r.status_code}"
+    except Exception as e:
+        return None, f"render failed: {str(e)[:120]}"
+
+# ================= GITHUB =================
+CODE_EXTS = (".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".rb", ".php", ".swift", ".kt")
+SKIP_PARTS = ("node_modules", ".git/", "dist/", "build/", "__pycache__", ".next/",
+              "vendor/", ".idea/", ".vscode/", ".min.js", ".min.css", ".d.ts", ".pyi",
+              "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock")
+JUNK_FILES = ("package-lock.json", "yarn.lock")
+
+def _gh_json(url):
+    r = requests.get(url, timeout=25, headers={"Accept": "application/vnd.github+json"})
+    return r.json() if r.status_code == 200 else None
+
+def _gh_text(url):
+    r = requests.get(url, timeout=25, headers={"Accept": "application/vnd.github.raw"})
+    return r.text if r.status_code == 200 else ""
+
+def fetch_repo(repo_url):
+    """Returns dict with labeled context sections. Raises RuntimeError on failure."""
+    m = re.search(r"github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+)", repo_url or "")
+    if not m:
+        raise RuntimeError("not a valid GitHub repo URL")
+    owner, repo = m.group(1), m.group(2).removesuffix(".git")
+    base = f"https://api.github.com/repos/{owner}/{repo}"
+
+    meta = _gh_json(base) or {}
+    default_branch = meta.get("default_branch", "main")
+
+    readme = ""
+    rd = _gh_json(f"{base}/readme")
+    if rd and rd.get("content"):
+        try:
+            readme = base64.b64decode(rd["content"]).decode("utf-8", "replace")
+        except Exception:
+            readme = ""
+
+    tree = _gh_json(f"{base}/git/trees/{default_branch}?recursive=1") or {}
+    paths = [t["path"] for t in tree.get("tree", [])
+             if t.get("type") == "blob"
+             and not any(p in t["path"] for p in SKIP_PARTS)
+             and os.path.basename(t["path"]) not in JUNK_FILES]
+    paths = paths[:80]
+
+    pkg = ""
+    if "package.json" in paths:
+        pkg = _gh_text(f"https://raw.githubusercontent.com/{owner}/{repo}/{default_branch}/package.json")[:1500]
+
+    # central source files: entry-ish, non-config code
+    code_files = [p for p in paths if p.endswith(CODE_EXTS)
+                  and not any(j in p for j in (".config.", "config."))]
+    code_files.sort(key=lambda p: (p.count("/"), len(p)))
+    excerpts = []
+    for p in code_files[:4]:
+        txt = _gh_text(f"https://raw.githubusercontent.com/{owner}/{repo}/{default_branch}/{p}")
+        if txt.strip():
+            excerpts.append(f"--- {p} ---\n{txt[:2500]}")
+
+    context = (
+        f"<repo>{owner}/{repo} — {meta.get('description') or ''} "
+        f"(language: {meta.get('language') or '?'}, stars: {meta.get('stargazers_count', 0)})</repo>\n"
+        f"<readme>\n{readme[:5000]}\n</readme>\n"
+        f"<file_tree>\n" + "\n".join(paths[:60]) + "\n</file_tree>\n"
+        f"<package_json>\n{pkg}\n</package_json>\n"
+        f"<code>\n" + "\n\n".join(excerpts)[:6000] + "\n</code>"
+    )
+    return {"owner": owner, "repo": repo, "meta": meta, "context": context}
+
+# ================= LLM CALLS =================
+def comprehend(ctx):
+    """Call 1 — deep understanding. temp 0.1 for fidelity."""
+    prompt = f"""You are a senior engineer who has read this exact codebase. Base everything ONLY on the repo context below. If the context doesn't support a claim, write "not clear from context" instead of inventing.
+
+RULE: Every claim must name something real from the repo context: a file path, a command, a config key, a function name, or a README section. A sentence with no concrete reference is a failed sentence — rewrite it.
+
+REJECTED — never write these words/phrases: {", ".join(REJECT_WORDS)}. Never write a sentence that would still be true if you swapped in a different repo's name.
+
+Repo context:
+{ctx}
+
+Return STRICT JSON with exactly these fields:
+{{
+  "explainer": "120-180 words. Explain this repo to a smart friend who doesn't code. No jargon; if you must use a technical term, define it in the same sentence.",
+  "short_text": "2-3 sentences. The absolute essence: what it is + why it matters.",
+  "how_it_works": ["4-6 steps, in order, one sentence each. Each step must cite the file(s) it comes from, e.g. [src/render.ts]. Steps must form a chain: the output of step N is the input of step N+1. If a step can't be tied to a file in the context, drop it — do not bridge gaps with guesses."],
+  "audience": "who this is for, specifically (not 'developers' — which developers, doing what)",
+  "proof_points": ["3-5 concrete, verifiable facts from the context: numbers, features, file names, commands"]
+}}
+{STRICT_JSON}"""
+    b = do_call(prompt, max_tokens=1800, temperature=0.1)
+    # hard quality gate: reject banned words, ask once for a clean rewrite
+    blob = json.dumps(b).lower()
+    if any(w in blob for w in REJECT_WORDS):
+        b = do_call(prompt + "\nYour last response used banned generic-marketing words. Rewrite every field avoiding them completely.",
+                    max_tokens=1800, temperature=0.1)
+    return b
+
+def make_diagram(brief):
+    """Call 2 — mermaid flowchart from the how-it-works steps. temp 0.1."""
+    steps = "\n".join(f"{i+1}. {s}" for i, s in enumerate(brief.get("how_it_works", [])))
+    prompt = f"""You are a technical diagrammer. Turn these how-it-works steps into a clean flowchart.
+
+Steps:
+{steps}
+
+Rules:
+- Output valid Mermaid code starting with "flowchart TD", 4-7 nodes max.
+- Node labels: 2-5 plain words each, no jargon, no parentheses, no quotes, no special characters.
+- Keep every node traceable to the steps above — no invented stages.
+- End with one node showing the outcome for the user.
+
+Return STRICT JSON: {{"mermaid": "flowchart TD\\n    A[First thing] --> B[Second thing]"}}
+{STRICT_JSON}"""
+    out = do_call(prompt, max_tokens=800, temperature=0.1)
+    code = out.get("mermaid", "")
+    return re.sub(r'```(?:mermaid)?', '', code).strip()
+
+EXAMPLE_ITEM = ('{"angle": "THE PROBLEM", "hook": "Dinner panic at 7pm again?", '
+                '"visual_hint": "empty fridge glowing in a dark kitchen", '
+                '"caption": "You open the fridge. Nothing makes sense together.\\nChefBot looks at what you actually have and builds dinner around it — no shopping trip.", '
+                '"hashtags": ["#mealprep", "#home cooking", "#foodtech", "#indiehackers"]}')
+
+def make_social(brief):
+    """Call 3 — 4 angle-assigned social items. temp 0.7 for creativity."""
+    ctx = (f"Project: {brief.get('short_text','')}\nAudience: {brief.get('audience','')}\n"
+           f"Proof points: {'; '.join(brief.get('proof_points', []))}")
+    prompt = f"""You are a sharp social-media copywriter who hates generic marketing. Everything must be traceable to this project:
+
+{ctx}
+
+REJECTED — never write these: {", ".join(REJECT_WORDS)}. Never "In today's fast-paced world…", never "Are you tired of…?". Never a sentence that would still be true with a different repo's name.
+
+Write exactly 4 items. Each item owns ONE angle — an item may not reuse another item's angle, vocabulary, or proof point:
+1. THE PROBLEM — the pain this project kills. Hook = the frustration, named concretely.
+2. THE MAGIC MOMENT — the single most impressive thing it does. Hook = the "wait, it does WHAT?" beat.
+3. THE PROOF — a concrete detail: a feature, a number, a file, a workflow step from the context.
+4. THE HUMAN — who this is for and why they'd care. Hook = direct address to that person.
+
+DISTINCTNESS CHECK (do this before outputting): list the 4 hooks side by side. If any two share a noun phrase, a verb, or the same sentence shape, rewrite the weaker one. No hashtag may appear in more than one caption. No hook may share more than 2 content words with another hook.
+
+FORMAT EXAMPLE (fictional repo — imitate the punch, not the content):
+{EXAMPLE_ITEM}
+
+Per item return: "angle", "hook" (5-9 words, curiosity gap, plain words that render cleanly as big poster text), "visual_hint" (5-10 words: the poster's background motif, monochrome-friendly, tied to the project), "caption" (2-4 short lines, human voice, ends with a soft CTA like "link in bio"), "hashtags" (4-6, no repeats across items).
+
+Return STRICT JSON: {{"items": [4 items]}}
+{STRICT_JSON}"""
+    out = do_call(prompt, max_tokens=2800, temperature=0.7)
+    items = out.get("items", [])
+    return [it for it in items if isinstance(it, dict) and it.get("hook")][:4]
+
+def critique_social(brief, items):
+    """Call 4 — one rubric-scored critique pass. temp 0.2. Worth the extra call."""
+    if not items:
+        return items
+    ctx = f"Project: {brief.get('short_text','')}\nProof: {'; '.join(brief.get('proof_points', []))}"
+    prompt = f"""You are a ruthless social-media editor. Project context: {ctx}
+
+Here are 4 social items as JSON:
+{json.dumps(items, indent=1)}
+
+Score EACH item 1-5 on:
+(a) the hook stops the scroll,
+(b) zero overlap with the other 3 items (angle, words, proof point),
+(c) every claim traceable to the project context,
+(d) sounds human, not AI.
+For any item scoring below 4 on any axis, rewrite ONLY that item (keep its angle, keep the same JSON shape).
+Return the full corrected set as STRICT JSON: {{"items": [4 items]}}
+{STRICT_JSON}"""
+    out = do_call(prompt, max_tokens=2800, temperature=0.2)
+    fixed = [it for it in out.get("items", []) if isinstance(it, dict) and it.get("hook")]
+    return fixed[:4] if fixed else items
+
+def make_voiceover(brief):
+    """Call 5 — spoken explainer script. temp 0.5. Write for the EAR, not the eye."""
+    ctx = (f"{brief.get('explainer','')}\nHow it works: "
+           + " ".join(brief.get("how_it_works", [])))
+    prompt = f"""Write a voiceover script about this project. A text-to-speech voice reads out everything you write, exactly as you write it. So write speech, not text.
+
+Project context:
+{ctx}
+
+Write for the EAR, not the eye:
+- Plain sentences only. No markdown, no bullets, no headings, no emoji, no symbols, no parentheses.
+- No URLs, no domain names (not even github.com/owner/repo), no version numbers as digits — spell out anything that must be spoken.
+- Contractions everywhere ("it's", "you'll"). Short sentences. One idea per sentence.
+- Vary sentence length for pacing: a short punchy line after two longer ones.
+- Read it back mentally: if a sentence feels stiff spoken aloud, rewrite it.
+- Banned AI tics: "Here's the thing", "It's not just X, it's Y", "And that matters because".
+- 130-160 words total (about 60-90 seconds spoken).
+- Structure: hook (1 line) → what it is (2-3 lines) → how it works, simply (3-4 lines) → who it's for + close (2 lines).
+
+Return STRICT JSON: {{"script": "..."}}
+{STRICT_JSON}"""
+    out = do_call(prompt, max_tokens=900, temperature=0.5)
+    script = _clean_spoken(out.get("script", ""))
+    # hard gate: no URLs/domains may survive into the script
+    if re.search(r"https?://|\bwww\.|\b(?:[a-zA-Z0-9-]+\.)+(?:com|io|dev|app|net|org)\b", script):
+        out = do_call(prompt + "\nYour last script contained a URL or domain name. Rewrite with zero URLs, zero domains.",
+                      max_tokens=900, temperature=0.5)
+        script = _clean_spoken(out.get("script", ""))
+    return script
+
+def hook_image_prompt(hook, visual_hint):
+    return (f"Black and white minimalist Instagram poster, square 1:1. Huge bold sans-serif typography, "
+            f"perfectly legible, centered, reading exactly: \"{hook}\". "
+            f"Background: {visual_hint}, subtle and abstract, monochrome, lots of negative space. "
+            f"High contrast studio poster, clean professional design, no watermark, no logo, no extra text.")
+
+# ================= UI =================
+_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+:root{--ink:#0A0A0A;--paper:#fff;--wash:#F7F7F7;--line:#E8E8E8;--muted:#737373;}
+*{font-family:'Inter',-apple-system,'Segoe UI',sans-serif!important;}
+.stApp{background:var(--paper)!important;}
+#MainMenu,footer,header[data-testid="stHeader"]{display:none!important;}
+.block-container{max-width:880px!important;padding:0 20px 80px!important;}
+section[data-testid="stSidebar"]{display:none!important;}
+
+/* nav */
+.nav{display:flex;align-items:center;justify-content:space-between;padding:18px 0;border-bottom:1px solid var(--line);margin-bottom:8px;}
+.brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:17px;letter-spacing:-.02em;}
+.brand-mark{width:26px;height:26px;background:var(--ink);color:#fff;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;}
+.nav-note{font-size:12px;color:var(--muted);letter-spacing:.04em;}
+
+/* hero */
+.hero{text-align:center;padding:64px 8px 12px;}
+.kicker{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.22em;color:var(--muted);margin-bottom:18px;text-transform:uppercase;}
+.hero h1{font-size:clamp(2rem,6vw,3.4rem);font-weight:800;letter-spacing:-.045em;line-height:1.05;margin:0 0 16px;color:var(--ink);}
+.hero p{font-size:16px;color:var(--muted);max-width:520px;margin:0 auto;line-height:1.65;}
+div[data-testid="stTextInput"]{max-width:560px;margin:30px auto 0;}
+div[data-testid="stTextInput"] input{border-radius:10px!important;padding:15px 18px!important;font-size:15px!important;border:1px solid #D4D4D4!important;background:#fff!important;}
+div[data-testid="stTextInput"] input:focus{border-color:var(--ink)!important;box-shadow:0 0 0 3px rgba(0,0,0,.07)!important;}
+div[data-testid="stButton"]{max-width:560px;margin:12px auto 0;}
+div[data-testid="stButton"] button{background:var(--ink)!important;color:#fff!important;border:none!important;border-radius:10px!important;padding:15px!important;font-size:15px!important;font-weight:700!important;width:100%!important;transition:opacity .15s;}
+div[data-testid="stButton"] button:hover{opacity:.85!important;}
+
+/* steps */
+.steps{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin:34px 0 8px;}
+.step{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;color:#A3A3A3;border:1px solid var(--line);border-radius:999px;padding:8px 14px;background:#fff;}
+.step .n{width:20px;height:20px;border-radius:50%;background:var(--wash);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:10.5px;font-weight:700;}
+.step.done{color:var(--ink);border-color:#D4D4D4;}
+.step.done .n{background:var(--ink);color:#fff;border-color:var(--ink);}
+.step.active{color:var(--ink);border-color:var(--ink);}
+.step.active .n{background:#fff;border-color:var(--ink);animation:pulse 1.2s infinite;}
+@keyframes pulse{50%{transform:scale(1.15);}}
+
+/* sections */
+.sec{margin-top:64px;}
+.sec-kicker{font-size:11px;font-weight:700;letter-spacing:.22em;color:var(--muted);text-transform:uppercase;margin-bottom:10px;}
+.sec-h{font-size:clamp(1.4rem,3.5vw,1.9rem);font-weight:800;letter-spacing:-.03em;margin:0 0 20px;color:var(--ink);}
+.tldr{background:var(--ink);color:#fff;border-radius:16px;padding:30px 28px;font-size:clamp(1.05rem,2.6vw,1.3rem);line-height:1.6;font-weight:500;letter-spacing:-.01em;}
+.explainer{font-size:16.5px;line-height:1.8;color:#262626;max-width:680px;}
+.diagram{border:1px solid var(--line);border-radius:14px;background:#fff;padding:12px;}
+.diagram img{width:100%;border-radius:8px;}
+.stepper{display:flex;flex-direction:column;gap:0;}
+.fstep{display:flex;gap:16px;padding:16px 4px;border-bottom:1px solid var(--line);}
+.fstep:last-child{border-bottom:none;}
+.fstep .fn{width:30px;height:30px;flex-shrink:0;border-radius:50%;background:var(--ink);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;}
+.fstep p{margin:2px 0 0;font-size:15px;line-height:1.6;color:#262626;}
+
+/* audio */
+.audio-card{border:1px solid var(--line);border-radius:14px;padding:22px;background:var(--wash);}
+div[data-testid="stAudio"]{margin-bottom:6px;}
+.script{font-size:15px;line-height:1.85;color:#404040;border-left:3px solid var(--ink);padding-left:18px;margin:18px 0 0;font-style:italic;}
+
+/* instagram kit */
+.post{border:1px solid var(--line);border-radius:16px;overflow:hidden;margin-bottom:28px;background:#fff;}
+.post-grid{display:grid;grid-template-columns:300px 1fr;}
+.post-img{background:var(--wash);}
+.post-img img{width:100%;aspect-ratio:1/1;object-fit:cover;display:block;}
+.post-body{padding:26px 26px 22px;}
+.post-angle{font-size:10.5px;font-weight:700;letter-spacing:.2em;color:var(--muted);text-transform:uppercase;margin-bottom:10px;}
+.post-hook{font-size:19px;font-weight:800;letter-spacing:-.02em;line-height:1.3;margin:0 0 14px;color:var(--ink);}
+.post-cap{font-size:14.5px;line-height:1.7;color:#404040;white-space:pre-line;margin:0 0 14px;}
+.tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:18px;}
+.tag{font-size:12px;font-weight:600;color:var(--muted);background:var(--wash);border:1px solid var(--line);padding:4px 10px;border-radius:6px;}
+div[data-testid="stDownloadButton"] button{border-radius:8px!important;border:1px solid #D4D4D4!important;background:#fff!important;color:var(--ink)!important;font-weight:600!important;font-size:13px!important;padding:8px 16px!important;}
+div[data-testid="stDownloadButton"] button:hover{background:var(--ink)!important;color:#fff!important;}
+
+/* report + footer */
+div[data-testid="stExpander"]{border:1px solid var(--line)!important;border-radius:12px!important;}
+.report-row{display:flex;justify-content:space-between;font-size:13.5px;padding:8px 0;border-bottom:1px solid var(--line);color:#404040;}
+.report-row:last-child{border:none;}
+.ok{color:#15803d;font-weight:700;} .bad{color:#b91c1c;font-weight:700;}
+.footer{margin-top:72px;padding-top:24px;border-top:1px solid var(--line);text-align:center;font-size:12.5px;color:var(--muted);}
+.stAlert{border-radius:10px!important;}
+
+@media(max-width:700px){
+  .post-grid{grid-template-columns:1fr;}
+  .hero{padding:44px 4px 8px;}
+  .tldr{padding:24px 20px;}
+  .post-body{padding:20px;}
+  .nav-note{display:none;}
+}
+</style>
+"""
 
 def render_steps(done, active=None):
-    parts = []
-    for key, icon, label in STEPS:
-        cls = "done" if key in done else ("active" if key == active else "todo")
-        mark = "✓" if key in done else icon
-        parts.append(f'<div class="step {cls}"><div class="dot">{mark}</div>{label}</div>')
-    return '<div class="steps">' + "".join(parts) + "</div>"
-_CSS = "\n<style>\n@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Sora:wght@400;600;700;800&family=Playfair+Display:ital,wght@1,500;1,600;1,700&display=swap');\n\n  :root {\n    --bg:#fff; --bg2:#F9FAFB; --bg3:#F3F4F6;\n    --border:#E5E7EB; --border2:#D1D5DB;\n    --text:#0A0A0A; --text2:#374151; --text3:#6B7280; --text4:#9CA3AF;\n    --green:#059669;\n  }\n  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}\n  *{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif!important;}\n  html{scroll-behavior:smooth;}\n  ::selection{background:#0A0A0A;color:#fff;}\n\n  .stApp{background:var(--bg)!important;min-height:100vh;}\n  #MainMenu,footer,header[data-testid=\"stHeader\"]{display:none!important;}\n  .block-container{max-width:1160px!important;padding:0 clamp(16px,4vw,48px) 100px!important;margin:0 auto!important;}\n  section[data-testid=\"stSidebar\"]{display:none!important;}\n\n  .bg-canvas,.grid-overlay,.orb,.noise{display:none;}\n\n  /* NAV */\n  .nav{position:sticky;top:0;z-index:100;background:rgba(255,255,255,0.92);backdrop-filter:blur(20px) saturate(180%);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);margin:0 clamp(-16px,-4vw,-48px);padding:0 clamp(16px,4vw,48px);}\n  .nav-inner{max-width:1160px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;height:60px;}\n  .logo{font-family:'Sora',sans-serif!important;font-weight:800;font-size:18px;letter-spacing:-.04em;color:var(--text);display:flex;align-items:center;gap:9px;}\n  .logo-icon{width:30px;height:30px;border-radius:8px;background:var(--text)!important;color:#fff!important;display:flex;align-items:center;justify-content:center;font-size:14px;}\n  .logo-text span{color:var(--text3);}\n  .nav-links{display:flex;align-items:center;gap:28px;}\n  .nav-links a{color:var(--text3);text-decoration:none;font-size:14px;font-weight:500;transition:color .15s;}\n  .nav-links a:hover{color:var(--text);}\n  .nav-badge{background:var(--bg3);border:1px solid var(--border);color:var(--text3);font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:6px;}\n  .nav-cta{background:var(--text)!important;color:#fff!important;text-decoration:none;font-size:13px;font-weight:600;padding:9px 20px;border-radius:8px;transition:opacity .15s;}\n  .nav-cta:hover{opacity:.82;}\n\n  /* HERO */\n  .hero{text-align:center;padding:clamp(80px,11vw,130px) 16px clamp(20px,4vw,40px);position:relative;z-index:2;}\n  .badge{display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:600;letter-spacing:.14em;color:var(--text3);background:var(--bg3);border:1px solid var(--border);padding:6px 14px;border-radius:999px;margin-bottom:28px;text-transform:uppercase;}\n  .pulse-dot{width:5px;height:5px;border-radius:50%;background:var(--green);box-shadow:0 0 0 2px rgba(5,150,105,.2);animation:pulse 2s ease-in-out infinite;}\n  .hero h1{font-family:'Sora',sans-serif!important;font-size:clamp(2.6rem,7vw,5.2rem);font-weight:800;letter-spacing:-.05em;line-height:1.03;color:var(--text);margin:0 0 22px;}\n  .serif-accent{font-family:'Playfair Display',Georgia,serif!important;font-style:italic;font-weight:600;letter-spacing:-.02em;color:var(--text3);}\n  .hero p.sub{font-size:clamp(.95rem,2.5vw,1.15rem);color:var(--text3);max-width:560px;margin:0 auto 8px;line-height:1.75;font-weight:400;}\n\n  /* INPUT */\n  div[data-testid=\"stTextInput\"]{max-width:660px;margin:32px auto 0;position:relative;z-index:2;}\n  div[data-testid=\"stTextInput\"] label{display:none!important;}\n  div[data-testid=\"stTextInput\"] input{border-radius:12px!important;padding:16px 22px!important;font-size:14.5px!important;font-weight:400!important;border:1px solid var(--border2)!important;background:var(--bg)!important;color:var(--text)!important;box-shadow:0 1px 3px rgba(0,0,0,.06)!important;transition:border-color .15s,box-shadow .15s!important;caret-color:var(--text)!important;}\n  div[data-testid=\"stTextInput\"] input::placeholder{color:var(--text4)!important;}\n  div[data-testid=\"stTextInput\"] input:focus{border-color:var(--text)!important;box-shadow:0 0 0 3px rgba(10,10,10,.08)!important;background:var(--bg)!important;}\n\n  /* BUTTON */\n  div[data-testid=\"stButton\"]{margin-top:14px;position:relative;z-index:2;}\n  div[data-testid=\"stButton\"] button{background:var(--text)!important;color:#fff!important;border:none!important;border-radius:12px!important;padding:16px 40px!important;font-size:14.5px!important;font-weight:600!important;letter-spacing:-.01em!important;box-shadow:0 1px 3px rgba(0,0,0,.12)!important;transition:opacity .15s,transform .15s!important;width:100%!important;}\n  div[data-testid=\"stButton\"] button p{color:#fff!important;}\n  div[data-testid=\"stButton\"] button:hover{opacity:.86!important;transform:translateY(-1px)!important;box-shadow:0 4px 12px rgba(0,0,0,.15)!important;}\n\n  /* STATS */\n  .stats{display:flex;justify-content:center;align-items:center;margin:64px auto 0;max-width:780px;position:relative;z-index:2;border:1px solid var(--border);border-radius:16px;flex-wrap:wrap;overflow:hidden;background:var(--bg2);}\n  .stat{text-align:center;padding:24px 40px;flex:1;min-width:120px;}\n  .stat+.stat{border-left:1px solid var(--border);}\n  .stat b{display:block;font-size:32px;font-weight:800;letter-spacing:-.04em;color:var(--text);margin-bottom:4px;}\n  .stat span{font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--text4);}\n\n  /* TICKER */\n  .ticker{margin:64px clamp(-16px,-4vw,-48px) 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:var(--bg2);overflow:hidden;position:relative;z-index:2;}\n  .ticker-track{display:flex;gap:0;width:max-content;animation:tick 32s linear infinite;padding:15px 0;}\n  .ticker:hover .ticker-track{animation-play-state:paused;}\n  .tick{font-size:11px;font-weight:700;letter-spacing:.22em;color:var(--text4);padding:0 28px;white-space:nowrap;text-transform:uppercase;}\n  .tick em{font-style:normal;color:var(--text3);padding-right:28px;}\n  @keyframes tick{to{transform:translateX(-50%);}}\n\n  /* SECTIONS */\n  .section{max-width:1100px;margin:0 auto;padding:clamp(80px,10vw,112px) 0 0;position:relative;z-index:2;}\n  .kicker{display:inline-flex;align-items:center;gap:8px;font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:var(--text3);margin-bottom:14px;}\n  .kicker::before{content:'';width:16px;height:1px;background:var(--border2);}\n  .sec-h{font-family:'Sora',sans-serif!important;font-size:clamp(1.8rem,4.5vw,2.9rem);font-weight:800;letter-spacing:-.04em;color:var(--text);margin:0 0 14px;line-height:1.1;}\n  .sec-p{color:var(--text3);font-size:16px;line-height:1.75;max-width:560px;margin:0 0 44px;font-weight:400;}\n\n  /* HOW IT WORKS */\n  .how-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border);border:1px solid var(--border);border-radius:20px;overflow:hidden;}\n  .how-card{background:var(--bg);padding:36px 30px;transition:background .2s;}\n  .how-card:hover{background:var(--bg2);}\n  .how-card::before{display:none;}\n  .how-num{font-size:12px;font-weight:700;letter-spacing:.06em;color:var(--text4);margin-bottom:18px;}\n  .how-card h3{font-size:16px;font-weight:700;margin:0 0 9px;color:var(--text);letter-spacing:-.01em;}\n  .how-card p{font-size:14px;color:var(--text3);line-height:1.7;margin:0;}\n\n  /* BUNDLE */\n  .bundle-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;}\n  .bundle-card{background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:28px 26px;transition:border-color .2s,box-shadow .2s;position:relative;overflow:hidden;}\n  .bundle-card::after{display:none;}\n  .bundle-card:hover{border-color:var(--border2);box-shadow:0 4px 24px rgba(0,0,0,.06);}\n  .bundle-icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;background:var(--bg);border:1px solid var(--border);margin-bottom:18px;}\n  .bundle-card h3{font-size:15px;font-weight:700;margin:0 0 7px;color:var(--text);letter-spacing:-.01em;}\n  .bundle-card p{font-size:13.5px;color:var(--text3);line-height:1.65;margin:0;}\n\n  /* STEPS */\n  .steps{display:flex;gap:6px;justify-content:center;margin:40px auto 16px;max-width:1000px;position:relative;z-index:2;flex-wrap:wrap;}\n  .step{display:flex;align-items:center;gap:9px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:10px 16px 10px 10px;font-size:12.5px;font-weight:600;color:var(--text4);transition:all .25s;}\n  .step .dot{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;background:var(--bg3);font-size:13px;flex-shrink:0;}\n  .step.done{color:var(--green);border-color:rgba(5,150,105,.2);background:rgba(5,150,105,.04);}\n  .step.done .dot{background:rgba(5,150,105,.1);}\n  .step.active{color:var(--text);border-color:var(--border2);background:var(--bg);box-shadow:0 2px 8px rgba(0,0,0,.08);}\n  .step.active .dot{background:var(--text);color:#fff;animation:pulse 1.4s ease-in-out infinite;}\n  @keyframes pulse{0%,100%{transform:scale(1);opacity:1;}50%{transform:scale(1.1);opacity:.8;}}\n\n  /* RESULTS */\n  .sec-title{font-family:'Sora',sans-serif!important;font-size:clamp(1.5rem,3.5vw,2rem);font-weight:800;letter-spacing:-.035em;color:var(--text);margin:72px 0 6px;position:relative;z-index:2;}\n  .sec-sub{color:var(--text3);margin-bottom:24px;position:relative;z-index:2;font-size:14.5px;}\n  .demo-card{background:var(--text);border-radius:20px;padding:clamp(28px,4vw,52px);color:#fff;position:relative;overflow:hidden;z-index:2;box-shadow:0 20px 60px -16px rgba(0,0,0,.3);margin-top:16px;}\n  .demo-card::before,.demo-card::after{display:none;}\n  .demo-kicker{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;letter-spacing:.16em;color:rgba(255,255,255,.45);margin-bottom:14px;position:relative;z-index:1;border:1px solid rgba(255,255,255,.12);padding:5px 12px;border-radius:999px;}\n  .demo-card h2{font-family:'Sora',sans-serif!important;font-size:clamp(1.4rem,3.5vw,2rem);font-weight:800;margin:0 0 20px;position:relative;z-index:1;letter-spacing:-.03em;color:#fff;}\n  .demo-card p.script{color:rgba(255,255,255,.65);line-height:1.85;font-size:15.5px;position:relative;z-index:1;margin-bottom:14px;font-weight:400;}\n\n  /* PITCH */\n  .pitch-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;position:relative;z-index:2;}\n  .pitch-card{background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:28px 24px;position:relative;overflow:hidden;animation:fadeUp .5s cubic-bezier(.22,1,.36,1) both;transition:border-color .2s,box-shadow .2s;}\n  .pitch-card:hover{border-color:var(--border2);box-shadow:0 4px 24px rgba(0,0,0,.06);}\n  .pitch-card::before{display:none;}\n  /* HONEST REVIEW */\n  .sw-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:26px 0 8px;position:relative;z-index:2;}\n  .sw-card{background:var(--bg2);border:1px solid var(--border);border-radius:18px;padding:28px 26px;animation:fadeUp .5s cubic-bezier(.22,1,.36,1) both;transition:border-color .2s,box-shadow .2s;}\n  .sw-card:hover{border-color:var(--border2);box-shadow:0 4px 24px rgba(0,0,0,.06);}\n  .sw-card.strengths{border-top:3px solid var(--green);}\n  .sw-card.weaknesses{border-top:3px solid #DC2626;}\n  .sw-card h3{font-family:'Sora',sans-serif;font-size:17px;margin:0 0 16px;letter-spacing:-.01em;}\n  .sw-card ul{margin:0;padding:0;list-style:none;display:grid;gap:12px;}\n  .sw-card li{font-size:14.5px;line-height:1.6;color:var(--text2);padding-left:28px;position:relative;}\n  .sw-card.strengths li::before{content:\"✅\";position:absolute;left:0;top:0;}\n  .sw-card.weaknesses li::before{content:\"⚠️\";position:absolute;left:0;top:0;}\n  .pitch-card .icon{font-size:28px;margin-bottom:14px;}\n  .pitch-card h3{font-size:15px;font-weight:700;color:var(--text);margin:0 0 8px;letter-spacing:-.01em;}\n  .pitch-card p{font-size:13.5px;color:var(--text3);line-height:1.65;margin:0;}\n\n  /* SOCIAL */\n  .post-wrap{display:grid;grid-template-columns:280px 1fr;gap:36px;align-items:start;background:var(--bg2);border:1px solid var(--border);border-radius:20px;padding:clamp(24px,4vw,40px);margin-bottom:20px;position:relative;z-index:2;animation:fadeUp .5s cubic-bezier(.22,1,.36,1) both;transition:border-color .2s,box-shadow .2s;}\n  .post-wrap:hover{border-color:var(--border2);box-shadow:0 4px 24px rgba(0,0,0,.06);}\n  .post-num{position:absolute;top:-12px;left:24px;background:var(--text);color:#fff;font-size:10.5px;font-weight:700;letter-spacing:.1em;padding:5px 14px;border-radius:999px;}\n  .post-img-wrap{border-radius:18px;overflow:hidden;border:1px solid var(--border);background:var(--bg3);\n    box-shadow:0 18px 40px -16px rgba(0,0,0,.22);\n    transition:transform .35s cubic-bezier(.22,1,.36,1),box-shadow .35s cubic-bezier(.22,1,.36,1);}\n  .post-img-wrap:hover{transform:translateY(-7px) scale(1.015);box-shadow:0 30px 60px -18px rgba(0,0,0,.3);}\n  .post-img{width:100%;aspect-ratio:1/1;object-fit:cover;display:block;background:var(--bg3);}\n  .hook{font-family:'Sora',sans-serif!important;font-size:clamp(1.2rem,3vw,1.65rem);font-weight:800;color:var(--text);letter-spacing:-.03em;margin:0 0 18px;line-height:1.2;}\n  .vo-label,.cap-label{font-size:10px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:var(--text4);margin:22px 0 7px;display:flex;align-items:center;gap:7px;}\n  .vo-label::after,.cap-label::after{content:'';flex:1;height:1px;background:var(--border);}\n  .vo-script{font-size:14.5px;color:var(--text3);font-style:italic;line-height:1.75;border-left:2px solid var(--border2);padding-left:14px;margin:0 0 8px;}\n  .cap-text{font-size:13.5px;color:var(--text3);line-height:1.7;white-space:pre-line;}\n  .tags{margin-top:14px;display:flex;flex-wrap:wrap;gap:5px;}\n  .tag{background:var(--bg3);color:var(--text3);font-size:11.5px;font-weight:600;padding:4px 10px;border-radius:6px;border:1px solid var(--border);transition:all .15s;}\n  .tag:hover{background:var(--border);color:var(--text);transform:translateY(-1px);}\n\n  /* DOWNLOAD */\n  div[data-testid=\"stDownloadButton\"] button{border-radius:9px!important;font-weight:600!important;border:1px solid var(--border)!important;color:var(--text2)!important;background:var(--bg2)!important;padding:9px 18px!important;font-size:13px!important;width:100%;transition:all .15s;letter-spacing:-.01em!important;}\n  div[data-testid=\"stDownloadButton\"] button:hover{background:var(--bg3)!important;border-color:var(--border2)!important;color:var(--text)!important;transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.06);}\n\n  /* EXPANDER */\n  div[data-testid=\"stExpander\"]{border:1px solid var(--border)!important;border-radius:14px!important;background:var(--bg2)!important;position:relative;z-index:2;}\n\n  /* CTA */\n  .cta-dark{margin:100px auto 0;max-width:1100px;background:var(--text);border-radius:24px;padding:clamp(48px,7vw,84px);text-align:center;position:relative;overflow:hidden;z-index:2;}\n  .cta-dark::before,.cta-dark::after{display:none;}\n  .cta-dark h2{font-family:'Sora',sans-serif!important;color:#fff;font-size:clamp(1.9rem,5vw,3.2rem);font-weight:800;letter-spacing:-.04em;margin:0 0 14px;position:relative;z-index:1;line-height:1.1;}\n  .cta-dark p{color:rgba(255,255,255,.5);font-size:16px;max-width:500px;margin:0 auto;line-height:1.75;position:relative;z-index:1;font-weight:400;}\n\n  /* FOOTER */\n  .footer{margin-top:80px;border-top:1px solid var(--border);padding:36px 0 18px;position:relative;z-index:2;}\n  .footer-inner{max-width:1100px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;}\n  .footer .logo{font-size:16px;}\n  .footer p{color:var(--text4);font-size:13px;margin:0;}\n  .footer p b{color:var(--text3);font-weight:600;}\n\n  /* ANIMATIONS */\n  @keyframes fadeUp{from{opacity:0;transform:translateY(20px);}to{opacity:1;transform:none;}}\n  .anim{animation:fadeUp .7s cubic-bezier(.22,1,.36,1) both;}\n  .d1{animation-delay:.08s;}.d2{animation-delay:.16s;}.d3{animation-delay:.24s;}.d4{animation-delay:.32s;}\n\n  /* STREAMLIT */\n  div[data-testid=\"stAudio\"]{border-radius:10px;overflow:hidden;border:1px solid var(--border);}\n  div[data-testid=\"stMarkdownContainer\"]{color:var(--text2)!important;}\n  div[data-testid=\"stMarkdownContainer\"] strong{color:var(--text)!important;}\n  div[data-testid=\"stMarkdownContainer\"] em{color:var(--text3)!important;}\n  .stAlert{border-radius:10px!important;border:1px solid var(--border)!important;background:var(--bg2)!important;}\n\n  /* RESPONSIVE */\n  @media(max-width:900px){\n    .nav{margin:0 -16px;padding:0 16px;}\n    .nav-links{display:none;}\n    .pitch-grid,.how-grid,.bundle-grid,.sw-grid{grid-template-columns:1fr;}\n    .how-grid{gap:0;}\n    .post-wrap{grid-template-columns:1fr;}\n    .stat{padding:18px 20px;}\n    .ticker{margin:56px -16px 0;}\n    .stats{border-radius:14px;}\n  }\n</style>\n<div class=\"bg-canvas\"></div>\n<div class=\"grid-overlay\"></div>\n<div class=\"orb orb-1\"></div>\n<div class=\"orb orb-2\"></div>\n<div class=\"orb orb-3\"></div>\n<div class=\"noise\"></div>\n"
-_NAV = "\n<nav class=\"nav\"><div class=\"nav-inner\">\n  <div class=\"logo\">\n    <div class=\"logo-icon\">⚡</div>\n    <div class=\"logo-text\">Hype<span>Repo</span></div>\n  </div>\n  <div class=\"nav-links\">\n    <a href=\"#how\">How it works</a>\n    <a href=\"#bundle\">What you get</a>\n    <span class=\"nav-badge\">AI-Powered</span>\n  </div>\n  <a class=\"nav-cta\" href=\"#top\">Generate Kit ✦</a>\n</div></nav>\n"
-_HERO = "\n<div class=\"hero\" id=\"top\">\n  <div class=\"badge anim\"><span class=\"pulse-dot\"></span>AI Marketing Agent &nbsp;·&nbsp; Zero setup</div>\n  <h1 class=\"anim d1\">Turn any repo into<br><span class=\"serif-accent\">a full launch kit.</span></h1>\n  <p class=\"sub anim d2\">Paste a GitHub URL and walk away with pitch cards, social posts with AI visuals, voiceovers, and an honest strengths-vs-weaknesses review — generated from your actual code, not a template.</p>\n</div>\n"
-_STATS = "\n<div class=\"stats anim\">\n  <div class=\"stat\"><b>3</b><span>AI visuals</span></div>\n  <div class=\"stat\"><b>3</b><span>Voiceovers</span></div>\n  <div class=\"stat\"><b>3</b><span>Pitch cards</span></div>\n  <div class=\"stat\"><b>1</b><span>Honest review</span></div>\n</div>\n"
-_TICKER = "\n<div class=\"ticker\"><div class=\"ticker-track\">\n  <span class=\"tick\"><em>✦</em>PITCH CARDS</span><span class=\"tick\"><em>✦</em>AI VOICEOVERS</span><span class=\"tick\"><em>✦</em>SCROLL-STOPPING VISUALS</span><span class=\"tick\"><em>✦</em>STRENGTHS & WEAKNESSES</span><span class=\"tick\"><em>✦</em>CAPTIONS & HASHTAGS</span><span class=\"tick\"><em>✦</em>ZERO EDITING NEEDED</span>\n  <span class=\"tick\"><em>✦</em>PITCH CARDS</span><span class=\"tick\"><em>✦</em>AI VOICEOVERS</span><span class=\"tick\"><em>✦</em>SCROLL-STOPPING VISUALS</span><span class=\"tick\"><em>✦</em>STRENGTHS & WEAKNESSES</span><span class=\"tick\"><em>✦</em>CAPTIONS & HASHTAGS</span><span class=\"tick\"><em>✦</em>ZERO EDITING NEEDED</span>\n</div></div>\n"
-_HOW = "\n<div class=\"section\" id=\"how\">\n  <div class=\"kicker\">HOW IT WORKS</div>\n  <div class=\"sec-h\">Repo link to launch kit<br>in under five minutes.</div>\n  <p class=\"sec-p\">No prompts. No templates. A five-stage AI pipeline reads your code, understands what you built, then writes, designs, and records everything.</p>\n  <div class=\"how-grid\">\n    <div class=\"how-card anim\"><div class=\"how-num\">01</div><h3>🔗 Paste your repo URL</h3><p>Drop any public GitHub URL. The agent fetches your README, repo metadata, and actual source files — not just the docs.</p></div>\n    <div class=\"how-card anim d1\"><div class=\"how-num\">02</div><h3>🧠 Deep code analysis</h3><p>A senior-engineer-grade LLM builds a concept brief: what you built, how it works, who it's for, and what makes it genuinely different.</p></div>\n    <div class=\"how-card anim d2\"><div class=\"how-num\">03</div><h3>🚀 Ship the full kit</h3><p>Pitch cards, social posts with AI visuals and voiceovers, plus an honest strengths-and-weaknesses breakdown. One click to download all.</p></div>\n  </div>\n</div>\n"
-_BUNDLE = "\n<div class=\"section\" id=\"bundle\">\n  <div class=\"kicker\">WHAT YOU GET</div>\n  <div class=\"sec-h\">Everything a launch needs.<br>Nothing it doesn't.</div>\n  <p class=\"sec-p\">Every asset is grounded in your actual code — never generic filler. Built from a real concept brief, not a template.</p>\n  <div class=\"bundle-grid\">\n    <div class=\"bundle-card anim\"><div class=\"bundle-icon\">✨</div><h3>Pitch Cards</h3><p>Three razor-sharp angles with concrete proof points — ready for your README or landing page hero.</p></div>\n    <div class=\"bundle-card anim d1\"><div class=\"bundle-icon\">📱</div><h3>Social Posts</h3><p>Problem → magic moment → proof. Scroll-stopping hooks, captions, and hashtags — three distinct angles.</p></div>\n    <div class=\"bundle-card anim d2\"><div class=\"bundle-icon\">🎨</div><h3>AI Visuals</h3><p>Custom 1:1 promo graphics per post, generated from prompts based on your project's real subject matter.</p></div>\n    <div class=\"bundle-card anim d3\"><div class=\"bundle-icon\">🎙️</div><h3>Voiceovers</h3><p>Natural-sounding AI narration for every post — no microphone, no studio needed.</p></div>\n    <div class=\"bundle-card anim d4\"><div class=\"bundle-icon\">⚖️</div><h3>Honest Review</h3><p>Brutally honest strengths and weaknesses, grounded in your actual code — what to brag about, what to fix.</p></div>\n    <div class=\"bundle-card anim\"><div class=\"bundle-icon\">⬇️</div><h3>Instant Download Kit</h3><p>Every image and MP3 is one click away. Take the whole bundle straight to your content scheduler.</p></div>\n  </div>\n</div>\n"
-_CTA = "\n<div class=\"cta-dark\">\n  <h2>Your repo deserves more<br>than <span class=\"serif-accent\">a README.</span></h2>\n  <p>Paste a link above and walk away with a complete launch kit — copy, visuals, voiceovers, and an honest review. Powered by real code analysis.</p>\n</div>\n<div class=\"footer\"><div class=\"footer-inner\">\n  <div class=\"logo\">\n    <div class=\"logo-icon\">⚡</div>\n    <div class=\"logo-text\">Hype<span>Repo</span></div>\n  </div>\n  <p>Built with <b>HypeRepo</b> — paste a repo, ship the hype. © 2026</p>\n</div></div>\n"
+    labels = ["Reading repo", "Understanding project", "Drawing the diagram",
+              "Writing the social kit", "Creating visuals", "Recording audio"]
+    keys = ["fetch", "comprehend", "diagram", "social", "visuals", "audio"]
+    out = ['<div class="steps">']
+    for k, lab in zip(keys, labels):
+        cls = "done" if k in done else ("active" if k == active else "")
+        mark = "✓" if k in done else str(keys.index(k) + 1)
+        out.append(f'<div class="step {cls}"><span class="n">{mark}</span>{lab}</div>')
+    out.append('</div>')
+    return "".join(out)
 
-# ================= DESIGN SYSTEM =================
+# ================= PAGE =================
+st.set_page_config(page_title="HypeRepo — paste a repo, get its story", layout="centered")
 st.markdown(_CSS, unsafe_allow_html=True)
-st.markdown(_NAV, unsafe_allow_html=True)
-st.markdown(_HERO, unsafe_allow_html=True)
+st.markdown('<div class="nav"><div class="brand"><div class="brand-mark">H</div>HypeRepo</div>'
+            '<div class="nav-note">REPO → STORY</div></div>', unsafe_allow_html=True)
+st.markdown('<div class="hero"><div class="kicker">AI repo explainer</div>'
+            '<h1>Paste a repo.<br>Get its story.</h1>'
+            '<p>A clean diagram of how it works, four scroll-stopping visuals with captions, '
+            'and a plain-English audio explanation — all generated from the actual code.</p></div>',
+            unsafe_allow_html=True)
+
 if not DO_API_KEY or not ALIBABA_API_KEY:
-    st.error("🔑 Missing API keys — add `DO_API_KEY` and `ALIBABA_API_KEY` in the app's Secrets settings.")
+    st.error("Missing API keys — add `DO_API_KEY` and `ALIBABA_API_KEY` in the app's Secrets settings.")
     st.stop()
 
-st.html('<div class="anim d3">', )
-repo_url = st.text_input("repo", placeholder="https://github.com/owner/repo  —  paste any public repo URL")
-st.html('</div>')
+repo_url = st.text_input("repo", placeholder="https://github.com/owner/repo", label_visibility="collapsed")
+go = st.button("Generate the story", use_container_width=True)
 
-_l, _c, _r = st.columns([1.2, 2, 1.2])
-with _c:
-    _btn = st.button("✨ Generate marketing bundle", use_container_width=True)
-
-if _btn:
+if go:
     if not repo_url.strip() or "github.com" not in repo_url:
         st.error("Please paste a valid GitHub repo URL.")
         st.stop()
 
-    out_dir = tempfile.mkdtemp(prefix="mktg_")
-    final, done = {}, []
     steps_ph = st.empty()
-    steps_ph.markdown(render_steps(done, active="fetch_repo"), unsafe_allow_html=True)
+    order = ["fetch", "comprehend", "diagram", "social", "visuals", "audio"]
+    done = []
     failed = None
+    results = {}
+
+    def tick(key):
+        done.append(key)
+        nxt = next((k for k in order if k not in done), None)
+        steps_ph.markdown(render_steps(done, active=nxt), unsafe_allow_html=True)
+
     try:
-        for chunk in video_agent.stream({"repo_url": repo_url.strip(), "out_dir": out_dir}):
-            for node, update in chunk.items():
-                if update:
-                    final.update(update)
-                done.append(node)
-                nxt = next((k for k, _, _ in STEPS if k not in done), None)
-                steps_ph.markdown(render_steps(done, active=nxt), unsafe_allow_html=True)
+        steps_ph.markdown(render_steps(done, active="fetch"), unsafe_allow_html=True)
+        repo = fetch_repo(repo_url.strip())
+        tick("fetch")
+
+        brief = comprehend(repo["context"])
+        results["brief"] = brief
+        tick("comprehend")
+
+        mermaid = make_diagram(brief)
+        d_bytes, d_err = fetch_diagram(mermaid)
+        results.update(mermaid=mermaid, diagram=d_bytes, diagram_err=d_err)
+        tick("diagram")
+
+        items = make_social(brief)
+        items = critique_social(brief, items)
+        results["items"] = items
+        tick("social")
+
+        images = []
+        for it in items:
+            png, err = qwen_image(hook_image_prompt(it.get("hook", ""), it.get("visual_hint", "abstract minimal shapes")))
+            images.append({"png": png, "err": err})
+        results["images"] = images
+        tick("visuals")
+
+        script = make_voiceover(brief)
+        audio, a_err = make_audio(script)
+        results.update(script=script, audio=audio, audio_err=a_err)
+        tick("audio")
     except Exception as e:
         failed = e
+
     steps_ph.markdown(render_steps(done), unsafe_allow_html=True)
     if failed is not None:
-        step_label = STEPS[len(done)][2] if len(done) < len(STEPS) else "finishing up"
-        st.error(f"⚠️ The run failed during **{step_label}** ({type(failed).__name__}): {html.escape(str(failed))[:250]}")
-        st.info("This is usually the AI returning malformed output — not your repo. Hit **Generate** again; it usually works on retry, and nothing was billed beyond this attempt.")
+        st.error(f"Something broke ({type(failed).__name__}): {html.escape(str(failed))[:250]}")
+        st.info("Usually the AI returning malformed output — hit **Generate the story** again and it normally works on retry.")
         st.stop()
 
-    m = re.search(r"github\.com/([a-zA-Z0-9_.-]+)/([a-zA-Z0-9_.-]+)", repo_url)
-    repo_name = html.escape(m.group(2)) if m else "project"
+    brief, items = results["brief"], results["items"]
+    repo_name = re.sub(r"\W+", "_", repo["repo"])[:30]
 
-    brief = final.get("concept_brief", {})
-    st.markdown('<div class="sec-title anim">⚖️ The Honest Review</div>'
-                '<div class="sec-sub anim d1">Grounded in your actual code — what to brag about, and what to fix before launch.</div>',
-                unsafe_allow_html=True)
-    def _sw(items):
-        items = [str(s) for s in (items or []) if str(s).strip()]
-        return "".join(f"<li>{html.escape(s)}</li>" for s in items) or "<li>—</li>"
-    if brief.get("_review_failed"):
-        # The review call itself flopped — say so, don't pretend.
-        st.markdown("""<div class="sw-grid anim d1">
-      <div class="sw-card"><h3>🧐 Review hiccup</h3><ul><li>The reviewer flopped this run — hit Generate again and it should fill in.</li></ul></div>
-    </div>""", unsafe_allow_html=True)
+    # 1 — short version
+    st.markdown('<div class="sec"><div class="sec-kicker">The short version</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="tldr">{html.escape(brief.get("short_text", ""))}</div></div>', unsafe_allow_html=True)
+
+    # 2 — diagram
+    st.markdown('<div class="sec"><div class="sec-kicker">How it works</div>'
+                '<div class="sec-h">The whole app, one diagram.</div>', unsafe_allow_html=True)
+    if results["diagram"]:
+        st.markdown('<div class="diagram">', unsafe_allow_html=True)
+        st.image(results["diagram"])
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.download_button("Download diagram (PNG)", results["diagram"],
+                           file_name=f"{repo_name}_how_it_works.png", mime="image/png")
     else:
-        # Genuine empty verdict? Leave it empty — no nagging, no invented content.
-        st.markdown(f"""<div class="sw-grid anim d1">
-      <div class="sw-card strengths"><h3>💪 Strengths</h3><ul>{_sw(brief.get("strengths"))}</ul></div>
-      <div class="sw-card weaknesses"><h3>🧐 Weaknesses</h3><ul>{_sw(brief.get("weaknesses"))}</ul></div>
-    </div>""", unsafe_allow_html=True)
+        st.warning(f"Couldn't render the diagram ({html.escape(results['diagram_err'][:120])}) — here are the steps instead:")
+        steps_html = "".join(
+            f'<div class="fstep"><div class="fn">{i+1}</div><p>{html.escape(re.sub(r"\[[^\]]+\]", "", s).strip())}</p></div>'
+            for i, s in enumerate(brief.get("how_it_works", [])))
+        st.markdown(f'<div class="stepper">{steps_html}</div>', unsafe_allow_html=True)
+    with st.expander("Diagram source (Mermaid)"):
+        st.code(results["mermaid"], language="mermaid")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="sec-title anim">✨ Pitch Cards</div>'
-                '<div class="sec-sub anim d1">The three strongest angles — ready for your README or landing page.</div>',
-                unsafe_allow_html=True)
-    icons = ["⚡", "🎯", "💎"]
-    cards_html = "".join(
-        f"""<div class="pitch-card d{i+1}"><div class="icon">{icons[i % 3]}</div>
-            <h3>{html.escape(c.get('headline', ''))}</h3><p>{html.escape(c.get('sub', ''))}</p></div>"""
-        for i, c in enumerate(final.get("pitch_cards", [])))
-    st.markdown(f'<div class="pitch-grid">{cards_html}</div>', unsafe_allow_html=True)
+    # 3 — explainer
+    st.markdown('<div class="sec"><div class="sec-kicker">The explanation</div>'
+                '<div class="sec-h">What this repo actually is.</div>', unsafe_allow_html=True)
+    st.markdown(f'<p class="explainer">{html.escape(brief.get("explainer", ""))}</p></div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="sec-title anim">📱 Social Posts</div>'
-                '<div class="sec-sub anim d1">Hook, voiceover, AI visual, caption & hashtags — previewed like real posts.</div>',
-                unsafe_allow_html=True)
-    for i, post in enumerate(final.get("social_posts", []), 1):
-        img_bytes = None
-        if post.get("img_path") and os.path.exists(post["img_path"]):
-            with open(post["img_path"], "rb") as f:
-                img_bytes = f.read()
-            img_tag = f'<img class="post-img" src="data:image/png;base64,{base64.b64encode(img_bytes).decode()}" />'
+    # 4 — audio
+    st.markdown('<div class="sec"><div class="sec-kicker">Listen</div>'
+                '<div class="sec-h">The 60-second version, out loud.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="audio-card">', unsafe_allow_html=True)
+    if results["audio"]:
+        st.audio(results["audio"], format="audio/mp3")
+        st.download_button("Download audio (MP3)", results["audio"],
+                           file_name=f"{repo_name}_explainer.mp3", mime="audio/mp3")
+    else:
+        st.warning(f"Audio failed: {html.escape(results['audio_err'][:150])}")
+    st.markdown(f'<p class="script">"{html.escape(results["script"])}"</p>', unsafe_allow_html=True)
+    st.markdown('</div></div>', unsafe_allow_html=True)
+
+    # 5 — instagram kit
+    st.markdown('<div class="sec"><div class="sec-kicker">Instagram kit</div>'
+                '<div class="sec-h">Four hooks. Four captions. Zero repetition.</div>', unsafe_allow_html=True)
+    for i, it in enumerate(items):
+        img = results["images"][i] if i < len(results["images"]) else {"png": None, "err": "missing"}
+        tags = "".join(f'<span class="tag">#{html.escape(str(t).lstrip("#"))}</span>' for t in it.get("hashtags", []))
+        if img["png"]:
+            st.markdown('<div class="diagram" style="margin-bottom:14px;">', unsafe_allow_html=True)
+            st.image(img["png"])
+            st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="post"><div class="post-body">'
+            f'<div class="post-angle">{html.escape(str(it.get("angle", "")))}</div>'
+            f'<p class="post-hook">{html.escape(str(it.get("hook", "")))}</p>'
+            f'<p class="post-cap">{html.escape(str(it.get("caption", "")))}</p>'
+            f'<div class="tags">{tags}</div>'
+            f'</div></div>', unsafe_allow_html=True)
+        if img["png"]:
+            st.download_button(f"Download visual {i+1} (PNG)", img["png"],
+                               file_name=f"{repo_name}_hook_{i+1}.png", mime="image/png",
+                               key=f"dl_img_{i}")
         else:
-            img_tag = ('<div class="post-img" style="display:flex;align-items:center;justify-content:center;'
-                       'color:#a1a1aa;font-size:13px;padding:20px;text-align:center;aspect-ratio:1/1;">'
-                       f'⚠ image failed<br>{html.escape(post.get("img_error", ""))[:120]}</div>')
-        hook = html.escape(post.get("hook", ""))
-        st.markdown(f"""<div class="post-wrap d{(i % 3) + 1}">
-          <div class="post-num">POST {i}</div>
-          <div class="post-img-wrap">{img_tag}</div>
-          <div>
-            <div class="hook">🪝 {hook}</div>
-            <div class="vo-label">VOICEOVER SCRIPT</div>
-            <p class="vo-script">"{html.escape(post.get('script', ''))}"</p>
-            <div class="cap-label">CAPTION</div>
-            <p class="cap-text">{html.escape(post.get('caption', ''))}</p>
-            <div class="tags">{"".join(f'<span class="tag">{html.escape(t)}</span>' for t in post.get("hashtags", []))}</div>
-          </div>
-        </div>""", unsafe_allow_html=True)
-        a_bytes = None
-        if post.get("audio_path") and os.path.exists(post["audio_path"]):
-            with open(post["audio_path"], "rb") as f:
-                a_bytes = f.read()
-            st.audio(a_bytes, format="audio/mpeg")
-        elif post.get("audio_error"):
-            st.warning(f"🎙️ Voiceover {i} failed: {post['audio_error'][:250]}")
-        c1, c2 = st.columns(2)
-        with c1:
-            if img_bytes:
-                st.download_button(f"⬇️ Image {i}", img_bytes, file_name=f"post_{i}.png", key=f"dl_img_{i}")
-        with c2:
-            if a_bytes:
-                st.download_button(f"⬇️ Voiceover {i}", a_bytes, file_name=f"post_{i}.mp3", key=f"dl_aud_{i}")
+            st.warning(f"Visual {i+1} failed: {html.escape(str(img['err'])[:150])}")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    # ================= GENERATION REPORT =================
-    _rep = []
-    for _i, _p in enumerate(final.get("social_posts", []), 1):
-        _img_ok = bool(_p.get("img_path") and os.path.exists(_p["img_path"]))
-        _aud_ok = bool(_p.get("audio_path") and os.path.exists(_p["audio_path"]))
-        _rep.append(f"{'✅' if _img_ok else '❌'} Post {_i} image · {'✅' if _aud_ok else '❌'} Post {_i} voiceover")
-    st.markdown("<div class='sec-title anim'>🧾 Generation report</div>"
-                "<div class='sec-sub anim d1'>What actually got built — no silent failures.</div>",
-                unsafe_allow_html=True)
-    for _line in _rep:
-        st.markdown(f"- {_line}")
+    # report
+    with st.expander("Generation report"):
+        rows = []
+        rows.append(("Diagram", "OK" if results["diagram"] else f"FAILED — {results['diagram_err'][:100]}"))
+        for i, im in enumerate(results["images"]):
+            rows.append((f"Visual {i+1}", "OK" if im["png"] else f"FAILED — {str(im['err'])[:100]}"))
+        rows.append(("Audio", "OK" if results["audio"] else f"FAILED — {results['audio_err'][:100]}"))
+        for label, status in rows:
+            cls = "ok" if status == "OK" else "bad"
+            st.markdown(f'<div class="report-row"><span>{html.escape(label)}</span>'
+                        f'<span class="{cls}">{html.escape(status)}</span></div>', unsafe_allow_html=True)
 
-# ================= STATS =================
-st.markdown(_STATS, unsafe_allow_html=True)
-
-# ================= TICKER =================
-st.markdown(_TICKER, unsafe_allow_html=True)
-
-# ================= HOW IT WORKS =================
-st.markdown(_HOW, unsafe_allow_html=True)
-
-# ================= WHAT YOU GET =================
-st.markdown(_BUNDLE, unsafe_allow_html=True)
-
-# ================= CTA + FOOTER =================
-st.markdown(_CTA, unsafe_allow_html=True)
+st.markdown('<div class="footer">HypeRepo — paste a repo, get its story. Built from real code, not templates.</div>',
+            unsafe_allow_html=True)
