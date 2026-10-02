@@ -10,6 +10,7 @@ import streamlit as st
 import dashscope
 from http import HTTPStatus
 from dashscope.audio.tts import SpeechSynthesizer
+from dashscope import ImageSynthesis
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
@@ -95,11 +96,12 @@ def search_online_recipes(ingredients: list, cuisine: str = "Anything") -> list:
                         meal_ings.append(val.strip().lower())
                         
                 detailed.append({
+                    "id": m.get("idMeal", ""),
                     "title": meal_data.get("strMeal", ""),
                     "category": meal_data.get("strCategory", ""),
                     "area": meal_data.get("strArea", ""),
                     "thumb": meal_data.get("strMealThumb", ""),
-                    "source": meal_data.get("strSource", ""),
+                    "source": meal_data.get("strSource") or meal_data.get("strYoutube") or f"https://www.themealdb.com/meal/{m.get('idMeal')}",
                     "ingredients": meal_ings,
                     "instructions": meal_data.get("strInstructions", "")
                 })
@@ -107,83 +109,94 @@ def search_online_recipes(ingredients: list, cuisine: str = "Anything") -> list:
             pass
     return detailed
 
-# ── Accurate Food Photo Pipeline (Matches Exactly What You Cook) ───────────────
-def get_accurate_dish_image(dish_name: str, fallback_thumb: str = "") -> str:
-    """Take dish title, search online directly for the same dish, and fetch the real photo."""
-    if fallback_thumb and fallback_thumb.startswith("http"):
-        return fallback_thumb
-
-    s = requests.Session()
-    s.headers.update({"User-Agent": "FridgeSnapBot/3.0 (culinary-assistant; contact@fridgesnap.org)"})
+# ── AI Food Photo via Alibaba Cloud DashScope (Wanx / Tongyi Wanxiang) ───────────
+def generate_alibaba_food_image(dish_name: str) -> str:
+    """Generate high-res gourmet food photo via Alibaba DashScope Wanx (Free Tier / Singapore)."""
+    if not ALIBABA_API_KEY:
+        return ""
 
     clean_title = re.sub(r"[^\w\s-]", " ", dish_name).strip()
-
-    # 1. Primary: Search Openverse directly online for the exact dish title
-    search_attempts = [clean_title]
     words = clean_title.split()
-    if len(words) > 3:
-        search_attempts.append(" ".join(words[:3]))
+    short_title = " ".join(words[:6]) if len(words) > 6 else clean_title
 
-    for q in search_attempts:
-        try:
-            url = f"https://api.openverse.org/v1/images/?q={urllib.parse.quote(q)}&page_size=4"
-            r = s.get(url, timeout=4)
-            if r.status_code == 200:
-                results = r.json().get("results", [])
-                for item in results:
-                    img_url = item.get("url")
-                    if img_url and not img_url.endswith(".svg"):
-                        return img_url
-        except Exception:
-            pass
+    prompt = (
+        f"Gourmet culinary photography of {short_title}, exquisitely plated on clean modern tableware, "
+        "appetizing restaurant presentation, soft studio lighting, ultra-high detail, professional food styling, 4k"
+    )
 
-    # 2. Secondary: TheMealDB search for exact or clean dish name
-    for q in search_attempts:
+    # Singapore (International) endpoint first, then mainland
+    endpoints = [
+        "https://dashscope-intl.aliyuncs.com/api/v1",
+        "https://dashscope.aliyuncs.com/api/v1"
+    ]
+    models = ["wanx-v1", "wanx2.1-t2i-turbo"]
+
+    for endpoint in endpoints:
+        dashscope.base_http_api_url = endpoint
+        for model in models:
+            try:
+                rsp = ImageSynthesis.call(
+                    model=model,
+                    prompt=prompt,
+                    api_key=ALIBABA_API_KEY,
+                    n=1,
+                    size="1024*1024"
+                )
+                if rsp.status_code == HTTPStatus.OK:
+                    if hasattr(rsp, "output") and hasattr(rsp.output, "results") and rsp.output.results:
+                        img_url = rsp.output.results[0].url
+                        if img_url and img_url.startswith("http"):
+                            return img_url
+                    # If async task returned, wait for completion
+                    if hasattr(rsp, "output") and hasattr(rsp.output, "task_id"):
+                        task_res = ImageSynthesis.wait(rsp, api_key=ALIBABA_API_KEY)
+                        if task_res.status_code == HTTPStatus.OK and task_res.output.results:
+                            img_url = task_res.output.results[0].url
+                            if img_url and img_url.startswith("http"):
+                                return img_url
+            except Exception:
+                continue
+
+    return ""
+
+
+# ── Dish Image Resolver: TheMealDB -> Alibaba Wanx -> Pollinations.ai Fallback ──
+def get_accurate_dish_image(dish_name: str, fallback_thumb: str = "") -> str:
+    """Find real photo from TheMealDB; if none, generate with Alibaba Wanx, then fallback."""
+    s = requests.Session()
+    s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; FridgeSnap/3.0)"})
+
+    clean_title = re.sub(r"[^\w\s-]", " ", dish_name).strip()
+    words = clean_title.split()
+    short_title = " ".join(words[:4]) if len(words) > 4 else clean_title
+
+    # 1. TheMealDB search for exact or short dish title
+    for q in ([clean_title, short_title] if clean_title != short_title else [clean_title]):
         try:
-            r = s.get(f"https://www.themealdb.com/api/json/v1/1/search.php?s={urllib.parse.quote(q)}", timeout=3)
+            r = s.get(f"https://www.themealdb.com/api/json/v1/1/search.php?s={urllib.parse.quote(q)}", timeout=4)
             if r.status_code == 200:
-                meals = r.json().get("meals")
+                meals = r.json().get("meals") or []
                 if meals and meals[0].get("strMealThumb"):
                     return meals[0]["strMealThumb"]
         except Exception:
             pass
 
-    # 3. Tertiary: Filtered Wikimedia Commons photo search (real food photos only)
+    # 2. Alibaba DashScope Wanx (Uses user's free Alibaba API key via Singapore/mainland)
     try:
-        url = (
-            "https://commons.wikimedia.org/w/api.php?action=query"
-            "&generator=search&gsrnamespace=6"
-            f"&gsrsearch={urllib.parse.quote(clean_title + ' food')}"
-            "&gsrlimit=6&prop=imageinfo&iiprop=url&iiurlwidth=800&format=json"
-        )
-        r = s.get(url, timeout=4)
-        if r.status_code == 200:
-            pages = r.json().get("query", {}).get("pages", {})
-            for _, page in pages.items():
-                title = page.get("title", "").lower()
-                if any(bad in title for bad in [".pdf", ".svg", ".tif", "menu", "carte", "book", "cover", "text", "label"]):
-                    continue
-                if any(ext in title for ext in [".jpg", ".jpeg", ".png", ".webp"]):
-                    ii = page.get("imageinfo", [])
-                    if ii and ii[0].get("thumburl"):
-                        return ii[0]["thumburl"]
+        ali_url = generate_alibaba_food_image(dish_name)
+        if ali_url:
+            return ali_url
     except Exception:
         pass
 
-    # 4. Wikipedia summary
-    try:
-        slug = urllib.parse.quote(clean_title.replace(" ", "_"))
-        r = s.get(f"https://en.wikipedia.org/api/rest_v1/page/summary/{slug}", timeout=3)
-        if r.status_code == 200:
-            d = r.json()
-            thumb = d.get("thumbnail", {}).get("source") or d.get("originalimage", {}).get("source")
-            if thumb and not thumb.endswith(".svg"):
-                return re.sub(r"/(\d+)px-", "/640px-", thumb)
-    except Exception:
-        pass
-
-    # Final fallback: high-res generic gourmet plate
-    return "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=800&auto=format&fit=crop&q=80"
+    # 3. Pollinations.ai instant generator fallback
+    prompt = (
+        f"professional food photography of {short_title}, "
+        "restaurant quality plating, natural overhead lighting, shallow depth of field, "
+        "high resolution, incredibly appetizing, 4K DSLR shot, clean white marble background"
+    )
+    encoded_prompt = urllib.parse.quote(prompt)
+    return f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=800&height=600&nologo=true&seed=7"
 
 # ── Image prep ──────────────────────────────────────────────────────────────────
 def prep_image(file_bytes, mime):
@@ -348,6 +361,12 @@ def extract_and_parse_recipes(raw_text: str) -> list:
 
         tip = str(r.get("tip") or "Serve immediately while fresh and hot.")
 
+        # Preserve candidate_index for image/source URL lookup in generate_recipes
+        try:
+            candidate_index = int(r.get("candidate_index", -1))
+        except Exception:
+            candidate_index = -1
+
         standardized.append({
             "title": title,
             "character": char,
@@ -356,6 +375,7 @@ def extract_and_parse_recipes(raw_text: str) -> list:
             "difficulty": difficulty,
             "image_url": image_url,
             "source_url": source_url,
+            "candidate_index": candidate_index,
             "uses": uses,
             "missing": missing,
             "steps": steps,
@@ -375,59 +395,96 @@ def generate_recipes(ingredients, cuisine, diet, max_time, servings, kcal_target
     kcal_line = f"Target max ~{kcal_target} kcal per serving." if kcal_target else ""
     diet_line = f"Dietary preference: {diet}." if diet != "No restriction" else ""
 
-    # Real online recipe search from culinary database
-    online_candidates = search_online_recipes(ingredients, cuisine)
-    candidates_text = ""
-    if online_candidates:
-        cand_list = []
-        for c in online_candidates:
-            cand_list.append(f"- Title: {c['title']} | Image: {c['thumb']} | Source: {c['source']} | Main Ingredients: {', '.join(c['ingredients'][:6])}")
-        candidates_text = "VERIFIED DISHES FROM ONLINE RECIPE SITES WITH REAL PHOTOS:\n" + "\n".join(cand_list)
+    # ── Fetch real recipes + images from TheMealDB ──────────────────────────────
+    online_candidates = search_online_recipes(ingredients, cuisine)  # list of dicts
 
-    system_text = f"""You are an expert master chef agent. A home cook has these fridge ingredients: {ing}.
-Assume salt, pepper, oil, water are available.
-Constraints: Cuisine={cuisine}. {diet_line} Max cook time ≤{max_time} min. Serves {servings}. {kcal_line}
+    # Build numbered lookup so LLM picks by index (no URL copying = no corruption)
+    cand_lookup = {}
+    cand_lines = []
+    for i, c in enumerate(online_candidates[:8]):
+        cand_lookup[i] = c
+        raw_inst = " ".join(c.get('instructions', '').split())
+        inst_snippet = (raw_inst[:220] + "...") if len(raw_inst) > 220 else raw_inst
+        cand_lines.append(
+            f"[{i}] \"{c['title']}\" — Ingredients: {', '.join(c['ingredients'][:6])}\n     Authentic Method: {inst_snippet}"
+        )
+    candidates_block = (
+        "REAL ONLINE RECIPES (pick from these as your base — use the index number):\n"
+        + "\n".join(cand_lines)
+    ) if cand_lines else ""
 
-{candidates_text}
+    system_text = f"""You are a world-class Executive Chef. The home cook has these fridge ingredients: {ing}.
+Assume salt, black pepper, cooking oil, and water are available in the pantry.
+{diet_line} Max cook time ≤{max_time} min. Serves {servings}. {kcal_line} Cuisine style: {cuisine}.
 
-Instructions:
-Generate exactly 3 distinct, delicious real dishes: 1) QUICK (≤20 min), 2) HEARTY, 3) CREATIVE.
-You can adapt or draw directly from the verified online dishes above or well-known authentic recipes.
-For each recipe include:
-- title: recognizable authentic dish name
-- character: QUICK, HEARTY, or CREATIVE
-- time_min: minutes to prepare
-- calories_est: calories per serving
+{candidates_block}
+
+Task: Select and adapt 3 DISTINCT real dishes — 1) QUICK (≤20 min), 2) HEARTY, 3) CREATIVE.
+Base your recipes on the numbered list above whenever possible so the cook gets real, tested dishes. If the list is empty or has fewer than 3, adapt classic well-known dishes.
+Each of the 3 recipes must be completely different from one another (use different candidate_index values).
+
+LANGUAGE REQUIREMENT (CRITICAL):
+- WRITE EVERYTHING IN 100% CLEAR ENGLISH!
+- Dish titles, ingredients, and steps MUST be in English. (For example, use "Chicken & Bell Pepper Frittata", NOT "Frittata di Pollo e Peperoni". Use "Chicken Parmigiana with Peppers", NOT "Pollo alla Parmigiana con Peperoni e Pomodori").
+- Never write instructions, titles, or ingredients in Italian, French, Spanish, or any other foreign language unless it is a universally recognized food word (like "Pesto" or "Parmigiana").
+
+PROFESSIONAL STEP-BY-STEP INSTRUCTIONS (STRICT CHEF RULES):
+1. Use real, precise culinary verbs: dice, mince, julienne, cube, sear, sauté, deglaze, simmer, reduce, roast, fold.
+2. NEVER invent nonsensical cooking terms like "cracked chicken" (chicken is cut into 1-inch cubes, thinly sliced, shredded, or seared — never "cracked").
+3. Each step MUST be specific and actionable with measurements, heat levels, pan types, and sensory cues:
+   - Always state pan/pot type and heat level (e.g. "Heat 1 tbsp olive oil in a wide heavy skillet over medium-high heat.")
+   - State specific cut/prep and amounts in English (e.g. "Cut 2 chicken breasts into 1-inch bite-sized cubes, pat dry with paper towels, and season with 1/2 tsp salt.")
+   - State exact time and sensory doneness (e.g. "Sear chicken in a single layer without stirring for 3-4 minutes until deep golden brown, then flip and cook 2 minutes more until opaque throughout.")
+4. Break preparation into 5-7 clear, sequential steps (Prep -> Aromatics/Browning -> Sauce/Simmer -> Finishing/Plating).
+
+For EACH recipe return these exact fields:
+- title: English dish name (e.g. "Crispy Garlic Herb Chicken")
+- candidate_index: integer index from the numbered list above (e.g. 0, 1, 2), or -1 if invented
+- character: exactly QUICK, HEARTY, or CREATIVE
+- time_min: integer cook time in minutes
+- calories_est: integer kcal per serving
 - difficulty: Easy, Medium, or Hard
-- image_url: verified photo URL if matched from online dishes, or empty string
-- source_url: link to original recipe site (e.g. BBC Good Food, AllRecipes) if matched, or empty string
-- uses: array of user ingredients used
-- missing: array of objects with 'item' and 'swap' fields for other needed items
-- steps: array of 4-7 concise cooking steps
-- tip: one pro cooking tip
+- uses: array of user's ingredients used (in English)
+- missing: array of objects like {{"item": "...", "swap": "..."}} for any extra staple needed (in English)
+- steps: array of 5-7 professional culinary steps (in English)
+- tip: one chef pro technique tip (in English)
 
-CRITICAL: Return ONLY a valid JSON object with schema: {{"recipes": [{{"title": "...", "character": "QUICK", "time_min": 20, "calories_est": 450, "difficulty": "Easy", "image_url": "", "source_url": "", "uses": ["..."], "missing": [{{"item": "...", "swap": "..."}}], "steps": ["..."], "tip": "..."}}]}}
-No markdown backticks, no greeting text."""
+CRITICAL: Return ONLY valid JSON. Schema:
+{{"recipes":[{{"title":"...","candidate_index":0,"character":"QUICK","time_min":20,"calories_est":450,"difficulty":"Easy","uses":["..."],"missing":[{{"item":"...","swap":"..."}}],"steps":["..."],"tip":"..."}}]}}
+No markdown formatting, no backticks, only valid JSON."""
 
     messages = [
         SystemMessage(content=system_text),
-        HumanMessage(content="Provide 3 recipes in valid JSON format.")
+        HumanMessage(content="Give me 3 recipes as valid JSON.")
     ]
-    
+
     res = llm.invoke(messages)
     raw_content = res.content if hasattr(res, "content") else str(res)
     try:
         recipes = extract_and_parse_recipes(raw_content)
     except Exception:
-        # Safe fallback repair prompt using direct messages
-        fix_system = 'Extract and format the recipe information into pure, valid JSON with schema: {"recipes": [{"title": "...", "character": "QUICK", "time_min": 20, "calories_est": 450, "difficulty": "Easy", "image_url": "", "source_url": "", "uses": ["..."], "missing": [{"item": "...", "swap": "..."}], "steps": ["..."], "tip": "..."}]}. Output JSON ONLY.'
-        messages_fix = [
-            SystemMessage(content=fix_system),
-            HumanMessage(content=raw_content[:2500])
-        ]
-        fix_res = llm.invoke(messages_fix)
+        fix_system = 'Reformat as pure JSON: {"recipes":[{"title":"...","candidate_index":-1,"character":"QUICK","time_min":20,"calories_est":450,"difficulty":"Easy","uses":["..."],"missing":[{"item":"...","swap":"..."}],"steps":["..."],"tip":"..."}]}. JSON ONLY.'
+        fix_res = llm.invoke([SystemMessage(content=fix_system), HumanMessage(content=raw_content[:2500])])
         fix_content = fix_res.content if hasattr(fix_res, "content") else str(fix_res)
         recipes = extract_and_parse_recipes(fix_content)
+
+    # ── Attach real image + source URL directly from the fetched candidate ───────
+    # This avoids asking the LLM to copy URLs (which it corrupts). We pull from data.
+    for r in recipes:
+        cidx = r.get("candidate_index", -1)
+        try:
+            cidx = int(cidx)
+        except Exception:
+            cidx = -1
+
+        if cidx >= 0 and cidx in cand_lookup:
+            cand = cand_lookup[cidx]
+            r["image_url"] = cand.get("thumb", "")   # TheMealDB strMealThumb — always a real food photo
+            r["source_url"] = cand.get("source", "") or f"https://www.themealdb.com"
+        else:
+            # Invented recipe — try to find a TheMealDB match by title
+            r["image_url"] = ""
+            r["source_url"] = ""
 
     return recipes
 
@@ -1146,9 +1203,12 @@ elif stage == 2:
                         try:
                             recs = generate_recipes(st.session_state.confirmed, cuisine, diet, max_time, servings, kcal_target)
                             st.session_state.recipes = recs
-                            # Preload accurate dish images matching the food
+                            # Use TheMealDB image if we matched a real candidate, else Pollinations AI
                             for i, r in enumerate(recs):
-                                st.session_state[f"img_{i}"] = get_accurate_dish_image(r.get("title", ""), r.get("image_url", ""))
+                                img = r.get("image_url", "")
+                                if not img or not img.startswith("http"):
+                                    img = get_accurate_dish_image(r.get("title", ""))
+                                st.session_state[f"img_{i}"] = img
                             st.session_state.stage = 3
                             st.rerun()
                         except Exception as e:
