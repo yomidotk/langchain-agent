@@ -6,5 +6,6 @@ langchain-mcp-adapters
 mcp
 langgraph-checkpoint-sqlite
 aiosqlite
+httpx
 python-dotenv
 langgraph-cli[inmem]

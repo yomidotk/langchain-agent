@@ -22,6 +22,7 @@ st.set_page_config(page_title="Study Buddy", page_icon="📚")
 import cards_store  # noqa: E402
 import chat_index  # noqa: E402
 import notes_store  # noqa: E402
+import tts  # noqa: E402
 from agent import HERE, Context, build_agent, describe_image, secret  # noqa: E402
 
 if not secret("DO_API_KEY"):
@@ -55,6 +56,7 @@ run, agent = get_runtime()
 # ---------------------------------------------------------------- state
 ss = st.session_state
 ss.setdefault("study", None)  # current flashcard session
+ss.setdefault("playing", None)  # which answer is being read aloud
 
 # Which chat are we in? The URL (?chat=...) wins; otherwise reopen the chat you used last.
 # (chats.json remembers it on disk, so even a plain refresh or a bare localhost URL brings it back.)
@@ -78,6 +80,12 @@ with st.sidebar:
     page = st.radio("Page", ["💬 Chat", "🃏 Flashcards"], label_visibility="collapsed")
     user_name = st.text_input("Your name", "Chiraz")
     level = st.selectbox("Your level", ["beginner", "intermediate", "advanced"], index=1)
+    has_tts = bool(secret("ALIBABA_API_KEY"))
+    voice, style = "Cherry", "Default voice"
+    if has_tts:
+        st.subheader("🔊 Voice")
+        voice = st.selectbox("Voice", tts.VOICES)
+        style = st.selectbox("Speaking style", list(tts.STYLES))
     st.button("➕ New conversation", on_click=new_conversation)
     past = chat_index.recent()
     if past:
@@ -115,6 +123,21 @@ def history(messages):
     return out
 
 
+def listen_ui(i: int, text: str):
+    """A 🔊 Listen button under an answer. Click it to hear the answer instead of reading it."""
+    key = f"{thread_id}_{i}"
+    fresh = st.button("🔊 Listen", key=f"listen_{key}")
+    if fresh:
+        ss.playing = key
+    if ss.playing == key:
+        try:
+            with st.spinner("Generating the voice..."):
+                audio = tts.synthesize(text, secret("ALIBABA_API_KEY"), voice, style)
+            st.audio(audio, format="audio/wav", autoplay=fresh)
+        except Exception as e:
+            st.error(f"Couldn't generate the voice: {e}")
+
+
 def call_agent(payload):
     with st.spinner("Thinking..."):
         run(agent.ainvoke(payload, config=config, context=context))
@@ -122,9 +145,11 @@ def call_agent(payload):
 
 def chat_page():
     st.title("💬 Chat")
-    for role, text in history(values.get("messages", [])):
+    for i, (role, text) in enumerate(history(values.get("messages", []))):
         with st.chat_message(role):
             st.markdown(text)
+            if role == "assistant" and has_tts:
+                listen_ui(i, text)
 
     pending = None  # the agent paused and needs a human decision
     for it in getattr(state, "interrupts", ()) or ():
