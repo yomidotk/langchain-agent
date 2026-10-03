@@ -248,11 +248,30 @@ def image_message(path: str, question: str) -> HumanMessage:
     )
 
 
+def image_message_bytes(raw: bytes, mime: str, question: str) -> HumanMessage:
+    """Build a message with text + image bytes (no file needed)."""
+    data = base64.b64encode(raw).decode()
+    return HumanMessage(
+        content=[
+            {"type": "text", "text": question},
+            {"type": "image", "base64": data, "mime_type": mime},
+        ]
+    )
+
+
 async def describe_image(path: str, question: str) -> str:
     """gpt-oss can't see images, so this sends them to a vision model on Alibaba."""
     if not secret("ALIBABA_API_KEY"):
         return "No ALIBABA_API_KEY set, so I can't look at images yet."
     reply = await VISION.ainvoke([image_message(path, question)])
+    return reply.text
+
+
+async def describe_image_bytes(raw: bytes, mime: str, question: str) -> str:
+    """In-memory variant: takes raw bytes instead of a file path (nothing written to disk)."""
+    if not secret("ALIBABA_API_KEY"):
+        return "No ALIBABA_API_KEY set, so I can't look at images yet."
+    reply = await VISION.ainvoke([image_message_bytes(raw, mime, question)])
     return reply.text
 
 

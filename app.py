@@ -2,10 +2,10 @@
 
 import asyncio
 import html
+import logging
 import random
 import re
 import sys
-import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -17,6 +17,11 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
+log = logging.getLogger(__name__)
+
+# ── Free-tier message cap ──────────────────────────────────────────────────────
+FREE_MSG_LIMIT = 10  # max user messages per chat thread before we pause the user
+
 st.set_page_config(page_title="Studeno", page_icon="🦕", layout="centered")
 
 import cards_store  # noqa: E402
@@ -25,7 +30,7 @@ import notes_store  # noqa: E402
 import organizer  # noqa: E402
 import tts  # noqa: E402
 import userdata  # noqa: E402
-from agent import HERE, QUIZ_ANSWERS_MARK, Context, build_agent, describe_image, secret  # noqa: E402
+from agent import HERE, QUIZ_ANSWERS_MARK, Context, build_agent, describe_image, describe_image_bytes, secret  # noqa: E402
 
 st.markdown(
     """
@@ -200,6 +205,34 @@ def render_quiz(text: str):
             st.markdown(answers.strip())
 
 
+# ── Image validation helpers ───────────────────────────────────────────────────
+_IMAGE_MAGIC = {
+    b"\xff\xd8\xff": "image/jpeg",   # JPEG
+    b"\x89PNG": "image/png",          # PNG
+}
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
+def _validate_image(f) -> tuple[bytes, str] | None:
+    """Return (raw_bytes, mime) if the file is a valid PNG/JPEG ≤5 MB, else None."""
+    data = f.getvalue()
+    if len(data) > _MAX_IMAGE_BYTES:
+        st.error("Image must be under 5 MB.")
+        return None
+    for magic, mime in _IMAGE_MAGIC.items():
+        if data.startswith(magic):
+            return data, mime
+    st.error("Only PNG and JPEG images are accepted.")
+    return None
+
+
+# ── Generic error helper ───────────────────────────────────────────────────────
+def _server_error(exc: Exception, user_msg: str = "Something went wrong. Please try again."):
+    """Show a safe generic message to the visitor; log the real error server-side."""
+    log.exception("[studeno] %s", exc)
+    st.error(user_msg)
+
+
 def listen_ui(i: int, text: str):
     """A 🔊 Listen button under an answer. Click it to hear the answer instead of reading it."""
     key = f"{thread_id}_{i}"
@@ -211,31 +244,40 @@ def listen_ui(i: int, text: str):
             with st.spinner("Generating the voice..."):
                 audio = tts.synthesize(text, secret("ALIBABA_API_KEY"), ss.get("voice", "Cherry"), ss.get("style"))
             st.audio(audio, format="audio/wav", autoplay=fresh)
-        except Exception as e:
-            st.error(f"Couldn't generate the voice: {e}")
+        except Exception as exc:
+            _server_error(exc, "Couldn't generate the voice right now.")
 
 
 def call_agent(payload):
-    with st.spinner("Thinking..."):
-        run(agent.ainvoke(payload, config=config, context=make_context()))
+    try:
+        with st.spinner("Thinking..."):
+            run(agent.ainvoke(payload, config=config, context=make_context()))
+    except Exception as exc:
+        _server_error(exc)
 
 
 def queue_prompt(text: str):
     ss.queued = text
 
 
-def send(text: str, files=None):
-    chat_index.touch(uid, thread_id, title=text)  # registers the chat in your list on its first message
+def _count_user_messages(messages: list) -> int:
+    """Count how many human messages are already in this chat thread."""
+    return sum(1 for m in messages if getattr(m, "type", None) == "human")
+
+
+def send(text: str, image_bytes: bytes | None = None, image_mime: str | None = None):
+    chat_index.touch(uid, thread_id, title=text)
     with st.chat_message("user"):
         st.markdown(text)
     to_agent = text
-    if files:  # multimodal: a vision model describes the image, the agent gets the description
-        f = files[0]
-        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(f.name).suffix) as tmp:
-            tmp.write(f.getvalue())
+    if image_bytes:  # kept entirely in memory, never touches disk
         with st.spinner("Looking at the image..."):
-            description = run(describe_image(tmp.name, text))
-        to_agent = f"{text}\n\n[Attached image, described by a vision model: {description}]"
+            try:
+                description = run(describe_image_bytes(image_bytes, image_mime, text))
+                to_agent = f"{text}\n\n[Attached image, described by a vision model: {description}]"
+            except Exception as exc:
+                _server_error(exc, "Couldn't analyse the image right now.")
+                return
     call_agent({"messages": [{"role": "user", "content": to_agent}]})
     st.rerun()
 
@@ -243,7 +285,12 @@ def send(text: str, files=None):
 def chat_page():
     title("Chat", "Ask anything, attach a screenshot, or turn what you learn into flashcards and quizzes.")
     queued = ss.pop("queued", None)
-    messages = history(values.get("messages", []))
+    raw_messages = values.get("messages", [])
+    messages = history(raw_messages)
+
+    # ── Free-tier cap ────────────────────────────────────────────────────────
+    user_msg_count = _count_user_messages(raw_messages)
+    limit_reached = user_msg_count >= FREE_MSG_LIMIT
 
     if not messages and not queued:
         st.markdown(f"#### Hi {ss.get('name', '')} 👋 What do you want to learn today?")
@@ -259,6 +306,11 @@ def chat_page():
             st.markdown(text)
             if role == "assistant" and has_tts:
                 listen_ui(i, text)
+
+    # Show remaining messages counter when getting close
+    remaining = FREE_MSG_LIMIT - user_msg_count
+    if 0 < remaining <= 3:
+        st.caption(f"⚠️ {remaining} free message{'s' if remaining != 1 else ''} left in this chat.")
 
     pending = None  # the agent paused and needs a human decision
     for it in getattr(state, "interrupts", ()) or ():
@@ -280,6 +332,14 @@ def chat_page():
             call_agent(Command(resume={"decisions": [decision] * len(pending)}))
             st.rerun()
 
+    if limit_reached:
+        st.info(
+            f"🎓 You've used all {FREE_MSG_LIMIT} free messages in this chat. "
+            "Start a **New chat** from the sidebar to continue!",
+            icon="🔒",
+        )
+        return  # no chat input rendered below — can't send more
+
     prompt = st.chat_input(
         "Ask me anything, or attach an image...",
         accept_file=True,
@@ -289,7 +349,13 @@ def chat_page():
     if queued:
         send(queued)
     elif prompt:
-        send(prompt.text or "Describe this image.", prompt.files)
+        img_bytes, img_mime = None, None
+        if prompt.files:
+            result = _validate_image(prompt.files[0])
+            if result is None:
+                st.stop()  # error already shown by _validate_image
+            img_bytes, img_mime = result
+        send(prompt.text or "Describe this image.", img_bytes, img_mime)
 
 
 # =================================================================== notes
