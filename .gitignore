@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Streamlit secrets & local config
+.streamlit/secrets.toml
+
+# SQLite databases, write-ahead logs, and shared memory locks
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Local environment variables
+.env
+
+# Data files created at runtime (if you prefer storing them locally)
+# notes.json
+# cards.json
+# chats.json

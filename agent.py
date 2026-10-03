@@ -1,4 +1,4 @@
-"""Study Buddy: one LangChain agent that uses everything from the course (except RAG, for now).
+"""Studeno: one LangChain agent that uses everything from the course (except RAG, for now).
 
 Course topic            -> where it shows up below
 ---------------------------------------------------------------
@@ -181,7 +181,7 @@ def build_quiz_tool():
 # ---------------------------------------------------------- Middleware
 def build_system_prompt(ctx: Context) -> str:
     return (
-        "You are Study Buddy, a friendly AI tutor.\n"
+        "You are Studeno, a friendly AI tutor.\n"
         f"The student is {ctx.user_name}, level: {ctx.level}. Adapt your explanations to that level.\n"
         "Use tools when they help: save_note for things worth remembering, "
         "create_flashcards when asked for flashcards (the student studies them on the Flashcards page). "
@@ -263,7 +263,7 @@ async def main():
     config = {"configurable": {"thread_id": "session-1"}}
     context = Context(user_name="Chiraz", level="intermediate")
 
-    print("Study Buddy ready. Type a message, '/image path.png question' for a picture, or 'quit'.")
+    print("Studeno ready. Type a message, '/image path.png question' for a picture, or 'quit'.")
     while True:
         text = input("\nyou> ").strip()
         if text.lower() in {"quit", "exit"}:

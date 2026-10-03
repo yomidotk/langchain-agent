@@ -1,4 +1,4 @@
-"""Streamlit UI for Study Buddy (chat + flip-card flashcards + notes). Run with:  streamlit run app.py"""
+"""Streamlit UI for Studeno (chat + flip-card flashcards + notes). Run with:  streamlit run app.py"""
 
 import asyncio
 import html
@@ -66,7 +66,7 @@ def get_runtime():
         return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
     async def make_saver():  # short-term memory saved in a SQLite file, so it survives refreshes and restarts
-        return AsyncSqliteSaver(await aiosqlite.connect(str(HERE / "study_buddy.db")))
+        return AsyncSqliteSaver(await aiosqlite.connect(str(HERE / "studeno.db")))
 
     client = MultiServerMCPClient(
         {"study_tools": {"command": sys.executable, "args": [str(HERE / "mcp_server.py")], "transport": "stdio"}}

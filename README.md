@@ -1,6 +1,6 @@
-# Focusly
+# Studeno
 
-A personal study companion built with Streamlit. Focusly supports contextual AI chat, image questions, saved notes, optional voice playback, and self-paced flashcard practice.
+A personal study companion built with Streamlit. Studeno supports contextual AI chat, image questions, saved notes, optional voice playback, and self-paced flashcard practice.
 
 ## Run locally
 

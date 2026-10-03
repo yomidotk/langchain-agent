@@ -1,5 +1,5 @@
 """Remembers which chats exist and which one you used last (saved in chats.json).
-The messages themselves live in study_buddy.db (the agent's checkpointer)."""
+The messages themselves live in studeno.db (the agent's checkpointer)."""
 
 import json
 import time
