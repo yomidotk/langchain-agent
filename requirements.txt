@@ -1,6 +1,8 @@
-streamlit
-requests
-langchain
+streamlit>=1.43
+langchain>=1.0
+langgraph>=1.0
 langchain-openai
-pydantic
-dashscope
+langchain-mcp-adapters
+mcp
+python-dotenv
+langgraph-cli[inmem]
