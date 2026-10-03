@@ -1,7 +1,9 @@
 """Streamlit UI for Study Buddy (chat + flip-card flashcards). Run with:  streamlit run app.py"""
+# Browser localStorage is used to persist chat messages across page refreshes.
 
 import asyncio
 import html
+import json as _json
 import random
 import sys
 import tempfile
@@ -51,6 +53,63 @@ ss.setdefault("thread_id", str(uuid.uuid4()))
 ss.setdefault("messages", [])  # what we display: {"role", "content"}
 ss.setdefault("pending", None)  # human-in-the-loop requests waiting for a decision
 ss.setdefault("study", None)  # current flashcard session
+ss.setdefault("_storage_loaded", False)  # whether we already loaded from browser localStorage
+
+# ── Browser localStorage bridge ───────────────────────────────────────────
+_LS_KEY = "study_buddy_chat"
+
+
+def _load_from_browser():
+    """On first run only, inject JS that reads localStorage and posts data back via query params."""
+    if ss._storage_loaded:
+        return
+    ss._storage_loaded = True
+    qp = st.query_params
+    raw = qp.get("_restore")
+    if raw:
+        try:
+            restored = _json.loads(raw)
+            if isinstance(restored, dict):
+                if restored.get("messages") and not ss.messages:
+                    ss.messages = restored["messages"]
+                if restored.get("thread_id"):
+                    ss.thread_id = restored["thread_id"]
+        except Exception:
+            pass
+        # Clear the query param so it doesn't stick in the URL
+        qp.clear()
+        return
+    # First load — inject JS to read localStorage and reload with data
+    components.html(
+        f"""
+        <script>
+        const data = localStorage.getItem("{_LS_KEY}");
+        if (data) {{
+            const encoded = encodeURIComponent(data);
+            window.parent.location.search = "?_restore=" + encoded;
+        }}
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _save_to_browser():
+    """Write current messages + thread_id to browser localStorage (hidden 0-height iframe)."""
+    payload = _json.dumps({"messages": ss.messages, "thread_id": ss.thread_id})
+    # Escape for JS string literal
+    escaped = payload.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+    components.html(
+        f"""
+        <script>
+        localStorage.setItem("{_LS_KEY}", `{escaped}`);
+        </script>
+        """,
+        height=0,
+    )
+
+
+_load_from_browser()
 
 # -------------------------------------------------------------- sidebar
 with st.sidebar:
@@ -60,6 +119,7 @@ with st.sidebar:
     level = st.selectbox("Your level", ["beginner", "intermediate", "advanced"], index=1)
     if st.button("New conversation"):
         ss.thread_id, ss.messages, ss.pending = str(uuid.uuid4()), [], None
+        _save_to_browser()  # clear localStorage too
         st.rerun()
 
 config = {"configurable": {"thread_id": ss.thread_id}}
@@ -84,6 +144,7 @@ def call_agent(payload):
         ss.pending = interrupts[0].value["action_requests"]
     else:
         ss.messages.append({"role": "assistant", "content": result["messages"][-1].text})
+        _save_to_browser()
 
 
 def chat_page():
@@ -129,6 +190,7 @@ def chat_page():
             to_agent = f"{text}\n\n[Attached image, described by a vision model: {description}]"
             shown = f"{text}\n\n🖼️ *{f.name} attached*"
         ss.messages.append({"role": "user", "content": shown})
+        _save_to_browser()
         call_agent({"messages": [{"role": "user", "content": to_agent}]})
         st.rerun()
 
