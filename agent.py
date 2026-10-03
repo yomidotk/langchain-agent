@@ -46,6 +46,7 @@ from langgraph.types import Command
 from typing_extensions import NotRequired
 
 import cards_store
+import notes_store
 
 load_dotenv()
 HERE = Path(__file__).parent
@@ -113,22 +114,21 @@ def get_profile(runtime: ToolRuntime[Context]) -> str:
 
 @tool
 def save_note(note: str, runtime: ToolRuntime) -> Command:
-    """Save a short study note so it can be recalled later in the conversation."""
+    """Save a short study note so it can be recalled later (also in future chats)."""
     notes = runtime.state.get("notes", [])
+    notes_store.add(note)  # saved in notes.json, shared by all chats
     return Command(
-        update={
+        update={  # and kept in this chat's state (course: Context and State)
             "notes": notes + [note],
-            "messages": [
-                ToolMessage(f"Saved note #{len(notes) + 1}: {note}", tool_call_id=runtime.tool_call_id)
-            ],
+            "messages": [ToolMessage(f"Saved note: {note}", tool_call_id=runtime.tool_call_id)],
         }
     )
 
 
 @tool
-def list_notes(runtime: ToolRuntime) -> str:
+def list_notes() -> str:
     """List every note saved so far."""
-    notes = runtime.state.get("notes", [])
+    notes = notes_store.load()
     return "\n".join(f"{i + 1}. {n}" for i, n in enumerate(notes)) or "No notes yet."
 
 

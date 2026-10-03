@@ -20,6 +20,8 @@ from langgraph.types import Command
 st.set_page_config(page_title="Study Buddy", page_icon="📚")
 
 import cards_store  # noqa: E402
+import chat_index  # noqa: E402
+import notes_store  # noqa: E402
 from agent import HERE, Context, build_agent, describe_image, secret  # noqa: E402
 
 if not secret("DO_API_KEY"):
@@ -54,15 +56,20 @@ run, agent = get_runtime()
 ss = st.session_state
 ss.setdefault("study", None)  # current flashcard session
 
-# The conversation id lives in the URL (?chat=...), so a browser refresh brings the same chat back.
-if "chat" not in st.query_params:
-    st.query_params["chat"] = uuid.uuid4().hex
-thread_id = st.query_params["chat"]
+# Which chat are we in? The URL (?chat=...) wins; otherwise reopen the chat you used last.
+# (chats.json remembers it on disk, so even a plain refresh or a bare localhost URL brings it back.)
+thread_id = st.query_params.get("chat") or chat_index.load()["last"] or chat_index.new_id()
+st.query_params["chat"] = thread_id
+chat_index.set_last(thread_id)
 config = {"configurable": {"thread_id": thread_id}}
 
 
 def new_conversation():
-    st.query_params["chat"] = uuid.uuid4().hex
+    st.query_params["chat"] = chat_index.new_id()
+
+
+def open_chat(chat_id: str):
+    st.query_params["chat"] = chat_id
 
 
 # -------------------------------------------------------------- sidebar
@@ -71,17 +78,23 @@ with st.sidebar:
     page = st.radio("Page", ["💬 Chat", "🃏 Flashcards"], label_visibility="collapsed")
     user_name = st.text_input("Your name", "Chiraz")
     level = st.selectbox("Your level", ["beginner", "intermediate", "advanced"], index=1)
-    st.button("New conversation", on_click=new_conversation)
+    st.button("➕ New conversation", on_click=new_conversation)
+    past = chat_index.recent()
+    if past:
+        st.caption("Your chats")
+        for cid, title in past:
+            st.button(f"💬 {title}", key=f"chat_{cid}", on_click=open_chat, args=(cid,), disabled=cid == thread_id)
 
 context = Context(user_name=user_name, level=level)  # runtime context
 state = run(agent.aget_state(config))  # everything saved for this chat: messages + notes
 values = state.values if state and state.values else {}
 
 with st.sidebar:
-    st.subheader("📝 Notes (agent state)")
-    for n in values.get("notes", []):
+    st.subheader("📝 Notes")
+    saved_notes = notes_store.load()
+    for n in saved_notes:
         st.markdown(f"- {n}")
-    if not values.get("notes"):
+    if not saved_notes:
         st.caption("Ask me to save a note.")
 
 
@@ -143,6 +156,7 @@ def chat_page():
     if prompt:
         text = prompt.text or "Describe this image."
         to_agent = text
+        chat_index.touch(thread_id, title=text)  # registers the chat in your list on its first message
         with st.chat_message("user"):
             st.markdown(text)
         if prompt.files:  # multimodal: a vision model describes the image, the agent gets the description
