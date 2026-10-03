@@ -1,4 +1,4 @@
-"""Studeno: one LangChain agent that uses everything from the course (except RAG, for now).
+"""Study Buddy: one LangChain agent that uses everything from the course (except RAG, for now).
 
 Course topic            -> where it shows up below
 ---------------------------------------------------------------
@@ -89,6 +89,7 @@ class Context:
 
     user_name: str = "friend"
     level: str = "beginner"  # beginner | intermediate | advanced
+    user_id: str = "local"  # whose private space (notes, flashcards) the tools should use
 
 
 class StudyState(AgentState):
@@ -98,6 +99,10 @@ class StudyState(AgentState):
 
 
 # ------------------------------------------------------------- Tools
+def _uid(runtime: ToolRuntime) -> str:
+    return runtime.context.user_id if runtime.context else "local"
+
+
 @tool
 def get_time() -> str:
     """Get the current date and time."""
@@ -112,10 +117,10 @@ def get_profile(runtime: ToolRuntime[Context]) -> str:
 
 
 @tool
-def save_note(note: str, runtime: ToolRuntime) -> Command:
+def save_note(note: str, runtime: ToolRuntime[Context]) -> Command:
     """Save a short study note so it can be recalled later (also in future chats)."""
     notes = runtime.state.get("notes", [])
-    notes_store.add(note)  # saved in notes.json, shared by all chats
+    notes_store.add(_uid(runtime), note)  # saved in this user's private notes file
     return Command(
         update={  # and kept in this chat's state (course: Context and State)
             "notes": notes + [note],
@@ -125,9 +130,9 @@ def save_note(note: str, runtime: ToolRuntime) -> Command:
 
 
 @tool
-def list_notes() -> str:
+def list_notes(runtime: ToolRuntime[Context]) -> str:
     """List every note saved so far, with the notebook (topic) each one belongs to."""
-    notes = notes_store.load()
+    notes = notes_store.load(_uid(runtime))
     return "\n".join(f"{i + 1}. [{n.get('topic') or 'unsorted'}] {n['text']}" for i, n in enumerate(notes)) or "No notes yet."
 
 
@@ -137,10 +142,10 @@ class Card(BaseModel):
 
 
 @tool
-def create_flashcards(concept: str, cards: list[Card]) -> str:
+def create_flashcards(concept: str, cards: list[Card], runtime: ToolRuntime[Context]) -> str:
     """Create a deck of flashcards for a concept. Give 5-8 clear question/answer pairs.
     The student studies them on the Flashcards page of the app."""
-    n = cards_store.add_cards(concept, [c.model_dump() for c in cards])
+    n = cards_store.add_cards(_uid(runtime), concept, [c.model_dump() for c in cards])
     return f"Created {n} flashcards for '{concept}'. Tell the student to open the Flashcards page to study them."
 
 
@@ -181,7 +186,7 @@ def build_quiz_tool():
 # ---------------------------------------------------------- Middleware
 def build_system_prompt(ctx: Context) -> str:
     return (
-        "You are Studeno, a friendly AI tutor.\n"
+        "You are Study Buddy, a friendly AI tutor.\n"
         f"The student is {ctx.user_name}, level: {ctx.level}. Adapt your explanations to that level.\n"
         "Use tools when they help: save_note for things worth remembering, "
         "create_flashcards when asked for flashcards (the student studies them on the Flashcards page). "
@@ -263,7 +268,7 @@ async def main():
     config = {"configurable": {"thread_id": "session-1"}}
     context = Context(user_name="Chiraz", level="intermediate")
 
-    print("Studeno ready. Type a message, '/image path.png question' for a picture, or 'quit'.")
+    print("Study Buddy ready. Type a message, '/image path.png question' for a picture, or 'quit'.")
     while True:
         text = input("\nyou> ").strip()
         if text.lower() in {"quit", "exit"}:

@@ -29,10 +29,10 @@ def _parse(text: str) -> list[dict]:
     return json.loads(match.group(0))["notebooks"]
 
 
-async def organize_notes(fresh: bool = False) -> int:
+async def organize_notes(uid: str, fresh: bool = False) -> int:
     """Sort every note into a notebook. fresh=True ignores the current notebooks and regroups from scratch.
     Returns the number of notebooks."""
-    notes = notes_store.load()
+    notes = notes_store.load(uid)
     if not notes:
         return 0
     existing = [] if fresh else sorted({n["topic"] for n in notes if n.get("topic")})
@@ -52,5 +52,5 @@ async def organize_notes(fresh: bool = False) -> int:
                 mapping[note_id] = title
     for note_id in ids - mapping.keys():  # anything the model forgot
         mapping[note_id] = "General"
-    notes_store.set_topics(mapping)
+    notes_store.set_topics(uid, mapping)
     return len(set(mapping.values()))

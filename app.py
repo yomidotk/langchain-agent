@@ -1,4 +1,4 @@
-"""Streamlit UI for Studeno (chat + flip-card flashcards + notes). Run with:  streamlit run app.py"""
+"""Streamlit UI for Study Buddy (chat + flip-card flashcards + notes). Run with:  streamlit run app.py"""
 
 import asyncio
 import html
@@ -17,13 +17,14 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
-st.set_page_config(page_title="Studeno", page_icon="🦕", layout="centered")
+st.set_page_config(page_title="Study Buddy", page_icon="📚", layout="centered")
 
 import cards_store  # noqa: E402
 import chat_index  # noqa: E402
 import notes_store  # noqa: E402
 import organizer  # noqa: E402
 import tts  # noqa: E402
+import userdata  # noqa: E402
 from agent import HERE, QUIZ_ANSWERS_MARK, Context, build_agent, describe_image, secret  # noqa: E402
 
 st.markdown(
@@ -66,7 +67,7 @@ def get_runtime():
         return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
     async def make_saver():  # short-term memory saved in a SQLite file, so it survives refreshes and restarts
-        return AsyncSqliteSaver(await aiosqlite.connect(str(HERE / "studeno.db")))
+        return AsyncSqliteSaver(await aiosqlite.connect(str(HERE / "study_buddy.db")))
 
     client = MultiServerMCPClient(
         {"study_tools": {"command": sys.executable, "args": [str(HERE / "mcp_server.py")], "transport": "stdio"}}
@@ -85,10 +86,27 @@ ss.setdefault("playing", None)  # which answer is being read aloud
 PAGES = ["💬 Chat", "🃏 Flashcards", "📝 Notes"]
 ss.setdefault("page", PAGES[0])
 
-# Which chat are we in? The URL (?chat=...) wins; otherwise reopen the chat you used last.
-thread_id = st.query_params.get("chat") or chat_index.load()["last"] or chat_index.new_id()
+# Each visitor gets a private space, identified by a random key in the URL (?u=...).
+# Nothing is shared between visitors: notes, flashcards and the chat list live in data/<key>/.
+uid = st.query_params.get("u")
+if not userdata.is_valid(uid) or uid == "local":
+    uid = userdata.new_uid()
+    st.query_params["u"] = uid
+
+
+def load_state(chat_id: str):
+    return run(agent.aget_state({"configurable": {"thread_id": chat_id}}))
+
+
+# Which chat are we in? The URL (?chat=...) wins; otherwise reopen the chat this visitor used last.
+index = chat_index.load(uid)
+thread_id = st.query_params.get("chat") or index["last"] or chat_index.new_id()
+state = load_state(thread_id)
+if thread_id not in index["chats"] and (state.values or {}).get("messages"):
+    thread_id = chat_index.new_id()  # that chat belongs to someone else, so start a fresh one
+    state = load_state(thread_id)
 st.query_params["chat"] = thread_id
-chat_index.set_last(thread_id)
+chat_index.set_last(uid, thread_id)
 config = {"configurable": {"thread_id": thread_id}}
 
 
@@ -105,14 +123,11 @@ def open_chat(chat_id: str):
 # -------------------------------------------------------------- sidebar
 has_tts = bool(secret("ALIBABA_API_KEY"))
 with st.sidebar:
-    st.markdown(
-        '<h1 style="text-align: center; font-size: 2.3rem; font-weight: 800; color: #6366f1; margin: 0 0 1rem 0; letter-spacing: -0.02em;">StuDeno</h1>',
-        unsafe_allow_html=True,
-    )
+    st.markdown("## 📚 Study Buddy")
     st.segmented_control("Menu", PAGES, key="page", label_visibility="collapsed")
     st.button("➕ New chat", on_click=new_conversation, type="primary")
 
-    past = chat_index.recent(8)
+    past = chat_index.recent(uid, 8)
     if past:
         st.caption("RECENT CHATS")
         for cid, chat_title in past:
@@ -125,14 +140,14 @@ with st.sidebar:
         if has_tts:
             st.selectbox("Voice", tts.VOICES, key="voice")
             st.selectbox("Speaking style", list(tts.STYLES), key="style")
+    st.caption("🔒 Your chats, notes and flashcards are private to this link. Bookmark this page to come back to them.")
 
 page = ss.get("page") or PAGES[0]
-state = run(agent.aget_state(config))  # everything saved for this chat: messages
-values = state.values if state and state.values else {}
+values = state.values if state and state.values else {}  # everything saved for this chat: messages
 
 
 def make_context() -> Context:  # runtime context, built fresh for every call so settings apply right away
-    return Context(user_name=ss.get("name", "friend"), level=ss.get("level", "intermediate"))
+    return Context(user_name=ss.get("name", "friend"), level=ss.get("level", "intermediate"), user_id=uid)
 
 
 # =================================================================== chat
@@ -194,7 +209,7 @@ def queue_prompt(text: str):
 
 
 def send(text: str, files=None):
-    chat_index.touch(thread_id, title=text)  # registers the chat in your list on its first message
+    chat_index.touch(uid, thread_id, title=text)  # registers the chat in your list on its first message
     with st.chat_message("user"):
         st.markdown(text)
     to_agent = text
@@ -263,7 +278,7 @@ def chat_page():
 
 # =================================================================== notes
 def delete_note(note_id: str):
-    notes_store.delete(note_id)
+    notes_store.delete(uid, note_id)
 
 
 def request_reorganize():
@@ -275,10 +290,10 @@ def notes_page():
     with st.form("add_note", clear_on_submit=True):
         text = st.text_input("Add a note yourself", placeholder="e.g. LoRA fine-tunes a model by training small adapter matrices")
         if st.form_submit_button("Add note") and text.strip():
-            notes_store.add(text.strip())
+            notes_store.add(uid, text.strip())
             st.rerun()
 
-    notes = notes_store.load()
+    notes = notes_store.load(uid)
     if not notes:
         st.info("No notes yet. In the chat, say something like *save a note: middleware wraps the model call*.")
         return
@@ -291,7 +306,7 @@ def notes_page():
         done = False
         try:
             with st.spinner("Organizing your notes into notebooks..."):
-                run(organizer.organize_notes(fresh=forced))
+                run(organizer.organize_notes(uid, fresh=forced))
             done = True
         except Exception as e:
             st.warning(f"Couldn't organize the notes right now ({e}). They're shown unsorted for now.")
@@ -370,7 +385,7 @@ def stop_study() -> None:
 
 def grade(correct: bool, card_id: str) -> None:
     study = ss.study
-    cards_store.record(study["concept"], card_id, correct)
+    cards_store.record(uid, study["concept"], card_id, correct)
     study["results"][card_id] = correct
     study["pos"] += 1
 
@@ -410,7 +425,7 @@ def overview(decks: dict) -> None:
 
     with st.expander("Manage decks"):
         if st.button(f"🗑️ Delete the '{concept}' deck"):
-            cards_store.delete_deck(concept)
+            cards_store.delete_deck(uid, concept)
             st.rerun()
 
 
@@ -457,7 +472,7 @@ def study_view(decks: dict) -> None:
 
 def flashcards_page():
     title("Flashcards", "Click a card to flip it, then say whether you got it. Missed cards can be redone later.")
-    decks = cards_store.load()
+    decks = cards_store.load(uid)
     if not decks:
         st.info("No flashcards yet. Go to the Chat page and ask: *make me flashcards about short-term memory*.")
         return
