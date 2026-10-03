@@ -1,4 +1,4 @@
-"""Streamlit UI for Study Buddy (chat + flip-card flashcards + notes). Run with:  streamlit run app.py"""
+"""Streamlit UI for Studeno (chat + flip-card flashcards + notes). Run with:  streamlit run app.py"""
 
 import asyncio
 import html
@@ -17,7 +17,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
-st.set_page_config(page_title="Study Buddy", page_icon="📚", layout="centered")
+st.set_page_config(page_title="Studeno", page_icon="🦕", layout="centered")
 
 import cards_store  # noqa: E402
 import chat_index  # noqa: E402
@@ -60,14 +60,27 @@ if not secret("DO_API_KEY"):
 def get_runtime():
     """Build the agent once. Async calls run on one background event loop, because
     Streamlit reruns the script on every click and async HTTP clients dislike changing loops."""
+    import sqlite3
+    from langgraph.checkpoint.memory import InMemorySaver
+
     loop = asyncio.new_event_loop()
     threading.Thread(target=loop.run_forever, daemon=True).start()
 
     def run(coro):
         return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
-    async def make_saver():  # short-term memory saved in a SQLite file, so it survives refreshes and restarts
-        return AsyncSqliteSaver(await aiosqlite.connect(str(HERE / "study_buddy.db")))
+    async def make_saver():
+        """Try SQLite in a writable temp dir; fall back to in-memory if the host blocks it."""
+        import tempfile
+        db_path = Path(tempfile.gettempdir()) / "studeno_checkpoints.db"
+        try:
+            conn = await aiosqlite.connect(str(db_path))
+            # quick smoke-test: will raise if disk is locked / read-only
+            await conn.execute("PRAGMA journal_mode=DELETE")
+            await conn.commit()
+            return AsyncSqliteSaver(conn)
+        except Exception:
+            return InMemorySaver()
 
     client = MultiServerMCPClient(
         {"study_tools": {"command": sys.executable, "args": [str(HERE / "mcp_server.py")], "transport": "stdio"}}
@@ -123,7 +136,10 @@ def open_chat(chat_id: str):
 # -------------------------------------------------------------- sidebar
 has_tts = bool(secret("ALIBABA_API_KEY"))
 with st.sidebar:
-    st.markdown("## 📚 Study Buddy")
+    st.markdown(
+        '<h1 style="text-align:center;font-size:2.3rem;font-weight:800;color:#6366f1;margin:0 0 1rem 0;letter-spacing:-.02em;">StuDeno</h1>',
+        unsafe_allow_html=True,
+    )
     st.segmented_control("Menu", PAGES, key="page", label_visibility="collapsed")
     st.button("➕ New chat", on_click=new_conversation, type="primary")
 
