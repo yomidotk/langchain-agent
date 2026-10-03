@@ -105,7 +105,10 @@ def open_chat(chat_id: str):
 # -------------------------------------------------------------- sidebar
 has_tts = bool(secret("ALIBABA_API_KEY"))
 with st.sidebar:
-    st.markdown("## StuDeno  ")
+    st.markdown(
+        '<h1 style="text-align: center; font-size: 2.3rem; font-weight: 800; color: #6366f1; margin: 0 0 1rem 0; letter-spacing: -0.02em;">StuDeno</h1>',
+        unsafe_allow_html=True,
+    )
     st.segmented_control("Menu", PAGES, key="page", label_visibility="collapsed")
     st.button("➕ New chat", on_click=new_conversation, type="primary")
 
