@@ -17,7 +17,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
-st.set_page_config(page_title="Study Buddy", page_icon="📚", layout="centered")
+st.set_page_config(page_title="Studeno", page_icon="🦕", layout="centered")
 
 import cards_store  # noqa: E402
 import chat_index  # noqa: E402
