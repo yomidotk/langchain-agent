@@ -3,9 +3,9 @@
 Course topic            -> where it shows up below
 ---------------------------------------------------------------
 Create Agent            -> create_agent(...) in build_agent()
-Foundational Models     -> make_model() + FAST / SMART models
+Foundational Models     -> do_model() / alibaba_model() + FAST / SMART / VISION
 Tools                   -> get_time, save_note, create_flashcards, send_email, ...
-Short-Term Memory       -> InMemorySaver + thread_id
+Short-Term Memory       -> checkpointer + thread_id
 Multimodal Messages     -> image_message() + Alibaba vision model
 MCP                     -> MultiServerMCPClient + mcp_server.py
 Context and State       -> Context (runtime context) + StudyState (custom state)
@@ -13,7 +13,7 @@ Multi-Agent Systems     -> quiz-maker sub-agent wrapped as a tool
 Middleware              -> personalize / ModelRouter / Summarization / HITL
 Managing Long Convos    -> SummarizationMiddleware
 Human-in-the-Loop       -> HumanInTheLoopMiddleware on send_email
-Dynamic Agents          -> @dynamic_prompt + ModelRouter (dynamic model)
+Dynamic Agents          -> dynamic prompt (language, level) + ModelRouter (dynamic model)
 Agent Chat UI           -> graph.py + langgraph.json
 """
 
@@ -27,7 +27,6 @@ from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import BaseModel
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -36,13 +35,13 @@ from langchain.agents.middleware import (
     SummarizationMiddleware,
     dynamic_prompt,
 )
-from langchain.chat_models import init_chat_model
 from langchain.messages import HumanMessage, ToolMessage
 from langchain.tools import ToolRuntime, tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
+from pydantic import BaseModel
 from typing_extensions import NotRequired
 
 import cards_store
@@ -90,6 +89,29 @@ class Context:
 
     user_name: str = "friend"
     level: str = "beginner"  # beginner | intermediate | advanced
+    language: str = "Match my language"  # one of the LANGUAGES keys below
+
+
+# What the student picks in the sidebar -> the rule that goes into the system prompt.
+LANGUAGES = {
+    "Match my language": (
+        "Reply in the same language and script as the student's latest message. "
+        "If they write Algerian Darija, answer in Darija too (same script), casual and not formal Arabic. "
+        "Keep technical terms and all code in English."
+    ),
+    "English": "Always reply in English.",
+    "Darija (Arabic script)": (
+        "Always reply in Algerian Darija (الدارجة الجزائرية) written in Arabic script, even if the student writes "
+        "English or French. Use casual Algerian wording (واش، كيفاش، بزاف، هاد الشي), not formal Modern Standard "
+        "Arabic. Keep technical terms (agent, middleware, thread_id...) and all code in English."
+    ),
+    "Darija (Latin letters)": (
+        "Always reply in Algerian Darija written in Latin letters, the way Algerians text "
+        "(like 'wach rak, kifach nchrahlek hada'), even if the student writes English or French. Casual wording, "
+        "not formal Arabic. Keep technical terms and all code in English."
+    ),
+    "Français": "Always reply in French.",
+}
 
 
 class StudyState(AgentState):
@@ -161,31 +183,38 @@ def build_quiz_tool():
         tools=[],
         system_prompt=(
             "You write short quizzes. Given a topic, write 3 multiple-choice questions "
-            "with 4 options each, and put the answers at the end."
+            "with 4 options each, and put the answers at the end. Follow the language rule you are given."
         ),
     )
 
     @tool
-    async def make_quiz(topic: str) -> str:
+    async def make_quiz(topic: str, runtime: ToolRuntime[Context]) -> str:
         """Delegate quiz creation on a topic to the quiz-maker sub-agent."""
-        result = await quiz_agent.ainvoke({"messages": [{"role": "user", "content": topic}]})
+        ctx = runtime.context or Context()
+        request = f"Topic: {topic}\nLanguage rule: {LANGUAGES[ctx.language]}"
+        result = await quiz_agent.ainvoke({"messages": [{"role": "user", "content": request}]})
         return result["messages"][-1].text
 
     return make_quiz
 
 
 # ---------------------------------------------------------- Middleware
-@dynamic_prompt
-def personalize(request: ModelRequest) -> str:
-    """Dynamic system prompt built from the runtime context."""
-    ctx = request.runtime.context
+def build_system_prompt(ctx: Context) -> str:
     return (
         "You are Study Buddy, a friendly AI tutor.\n"
         f"The student is {ctx.user_name}, level: {ctx.level}. Adapt your explanations to that level.\n"
         "Use tools when they help: notes for things worth remembering, make_quiz for quizzes, "
         "create_flashcards when asked for flashcards (the student studies them on the Flashcards page). "
-        "Never send an email without being asked."
+        "Never send an email without being asked.\n"
+        f"LANGUAGE RULE: {LANGUAGES.get(ctx.language, LANGUAGES['Match my language'])} "
+        "This also applies to flashcards and quizzes you write."
     )
+
+
+@dynamic_prompt
+def personalize(request: ModelRequest) -> str:
+    """Dynamic system prompt built from the runtime context."""
+    return build_system_prompt(request.runtime.context)
 
 
 class ModelRouter(AgentMiddleware):

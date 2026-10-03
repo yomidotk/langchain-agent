@@ -23,7 +23,7 @@ import cards_store  # noqa: E402
 import chat_index  # noqa: E402
 import notes_store  # noqa: E402
 import tts  # noqa: E402
-from agent import HERE, Context, build_agent, describe_image, secret  # noqa: E402
+from agent import HERE, LANGUAGES, Context, build_agent, describe_image, secret  # noqa: E402
 
 if not secret("DO_API_KEY"):
     st.error("Add DO_API_KEY (and ALIBABA_API_KEY) to .streamlit/secrets.toml or a .env file.")
@@ -80,6 +80,7 @@ with st.sidebar:
     page = st.radio("Page", ["💬 Chat", "🃏 Flashcards"], label_visibility="collapsed")
     user_name = st.text_input("Your name", "Chiraz")
     level = st.selectbox("Your level", ["beginner", "intermediate", "advanced"], index=1)
+    language = st.selectbox("Answer language", list(LANGUAGES))
     has_tts = bool(secret("ALIBABA_API_KEY"))
     voice, style = "Cherry", "Default voice"
     if has_tts:
@@ -93,7 +94,7 @@ with st.sidebar:
         for cid, title in past:
             st.button(f"💬 {title}", key=f"chat_{cid}", on_click=open_chat, args=(cid,), disabled=cid == thread_id)
 
-context = Context(user_name=user_name, level=level)  # runtime context
+context = Context(user_name=user_name, level=level, language=language)  # runtime context
 state = run(agent.aget_state(config))  # everything saved for this chat: messages + notes
 values = state.values if state and state.values else {}
 
@@ -123,8 +124,16 @@ def history(messages):
     return out
 
 
+def mostly_arabic(text: str) -> bool:
+    letters = [c for c in text if c.isalpha()]
+    return bool(letters) and sum("\u0600" <= c <= "\u06ff" for c in letters) / len(letters) > 0.3
+
+
 def listen_ui(i: int, text: str):
     """A 🔊 Listen button under an answer. Click it to hear the answer instead of reading it."""
+    if language.startswith("Darija") or mostly_arabic(text):  # Qwen-TTS has no Darija/Arabic voice
+        st.caption("🔇 Voice isn't available for Darija yet. Switch the answer language to English or Français to listen.")
+        return
     key = f"{thread_id}_{i}"
     fresh = st.button("🔊 Listen", key=f"listen_{key}")
     if fresh:
