@@ -187,7 +187,8 @@ def build_system_prompt(ctx: Context) -> str:
         "create_flashcards when asked for flashcards (the student studies them on the Flashcards page). "
         "To give a quiz you MUST call make_quiz; never invent a quiz yourself. The quiz appears in the chat "
         "automatically, so after calling it reply with one short sentence and do not repeat the questions. "
-        "Never send an email without being asked."
+        "Never send an email without being asked.\n"
+        "Always reply in English, even if the student writes in another language."
     )
 
 

@@ -165,16 +165,8 @@ def render_quiz(text: str):
             st.markdown(answers.strip())
 
 
-def mostly_arabic(text: str) -> bool:
-    letters = [c for c in text if c.isalpha()]
-    return bool(letters) and sum("\u0600" <= c <= "\u06ff" for c in letters) / len(letters) > 0.3
-
-
 def listen_ui(i: int, text: str):
     """A 🔊 Listen button under an answer. Click it to hear the answer instead of reading it."""
-    if mostly_arabic(text):  # Qwen-TTS has no Arabic/Darija voice
-        st.caption("🔇 Voice isn't available for Arabic or Darija text yet.")
-        return
     key = f"{thread_id}_{i}"
     fresh = st.button("🔊 Listen", key=f"listen_{key}")
     if fresh:
