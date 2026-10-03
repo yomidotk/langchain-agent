@@ -54,64 +54,531 @@ def get_runtime():
 run, agent = get_runtime()
 
 def inject_theme() -> None:
-    """Apply the Focusly product interface without changing app behavior."""
+    """Apply the luxury, light-mode editorial interface for Focusly."""
     st.markdown(
         """
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap');
-        :root { --navy:#101828; --navy-2:#18243a; --ink:#172033; --muted:#697386; --canvas:#f5f7fb; --card:#ffffff; --line:#e5e9f0; --blue:#4f46e5; --violet:#7c3aed; --blue-pale:#eef2ff; --success:#16803c; }
-        .stApp { background:var(--canvas); color:var(--ink); font-family:'DM Sans',sans-serif; }
-        [data-testid="stHeader"] { background:rgba(245,247,251,.86); border-bottom:1px solid rgba(229,233,240,.7); }
-        [data-testid="stSidebar"] { background:var(--navy); border:0; }
-        [data-testid="stSidebar"] > div:first-child { padding:1.25rem .95rem 1.6rem; }
-        [data-testid="stSidebar"] * { color:#e8edf8; }
-        [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p { color:#97a5c1 !important; }
-        [data-testid="stSidebar"] .stTextInput label, [data-testid="stSidebar"] .stSelectbox label { color:#aebad0 !important; font-size:.73rem; font-weight:700; text-transform:uppercase; letter-spacing:.08em; }
-        [data-testid="stSidebar"] div[data-baseweb="select"] > div, [data-testid="stSidebar"] .stTextInput input { background:var(--navy-2) !important; border-color:#30415f !important; color:#fff !important; }
-        [data-testid="stSidebar"] .stButton > button { background:transparent; border-color:transparent; color:#cdd7eb; text-align:left; padding:.58rem .65rem; }
-        [data-testid="stSidebar"] .stButton > button:hover { background:#223252; border-color:#304566; color:#fff; transform:none; }
-        [data-testid="stSidebar"] .stButton > button[kind="primary"] { background:linear-gradient(110deg,var(--blue),var(--violet)); border:0; color:#fff; text-align:center; padding:.68rem .7rem; box-shadow:0 10px 24px rgba(79,70,229,.28); }
-        [data-testid="stSidebar"] [data-testid="stRadio"] { gap:.35rem; }
-        [data-testid="stSidebar"] [data-testid="stRadio"] label { width:100%; padding:.62rem .65rem; border-radius:.6rem; transition:.15s ease; }
-        [data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) { background:#263858; color:#fff; font-weight:700; }
-        [data-testid="stSidebar"] [data-testid="stRadio"] input { accent-color:#818cf8; }
-        .block-container { max-width:1180px; padding:2.2rem 2.6rem 3rem; }
-        h1,h2,h3 { color:var(--ink) !important; letter-spacing:-.035em; }
-        h1 { font-family:'Playfair Display',Georgia,serif; font-size:clamp(2.1rem,4vw,3.25rem) !important; line-height:1.08; margin:0 !important; }
-        h2 { font-size:1.32rem !important; margin-top:1.8rem; }
-        .focusly-brand { display:flex; align-items:center; gap:.72rem; padding:.15rem .3rem 1.7rem; }
-        .focusly-mark { display:grid; place-items:center; width:2.25rem; height:2.25rem; border-radius:.72rem; background:linear-gradient(140deg,#8b5cf6,#4f46e5); color:#fff; font-weight:700; font-size:1.1rem; box-shadow:0 8px 20px rgba(79,70,229,.35); }
-        .focusly-brand strong { display:block; color:#fff; font-size:1.2rem; letter-spacing:-.04em; }
-        .focusly-brand span { display:block; color:#9eacc8; font-size:.7rem; margin-top:.1rem; }
-        .sidebar-section { color:#8d9bb7; font-size:.68rem; font-weight:700; text-transform:uppercase; letter-spacing:.13em; padding:.9rem .55rem .35rem; }
-        .workspace-top { display:flex; justify-content:space-between; align-items:center; gap:1rem; margin-bottom:1.8rem; }
-        .workspace-label { display:flex; align-items:center; gap:.55rem; color:var(--muted); font-size:.84rem; font-weight:600; }
-        .status-dot { width:.48rem; height:.48rem; border-radius:50%; background:#20b15a; box-shadow:0 0 0 4px #e2f7e9; }
-        .hero { position:relative; overflow:hidden; padding:2.25rem 2.4rem; border-radius:1.35rem; color:#fff; background:linear-gradient(118deg,#18254a 0%,#263c73 55%,#594bb7 100%); box-shadow:0 18px 44px rgba(30,46,89,.18); margin-bottom:1.5rem; }
-        .hero:after { content:''; position:absolute; width:20rem; height:20rem; border:1px solid rgba(255,255,255,.13); border-radius:50%; right:-6rem; top:-10rem; box-shadow:-4rem 5rem 0 -1px rgba(255,255,255,.06), -8rem 9rem 0 -1px rgba(255,255,255,.05); }
-        .hero > * { position:relative; z-index:1; }
-        .hero-kicker { font-size:.73rem; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:#bfc9ff; margin-bottom:.6rem; }
-        .hero h1 { color:#fff !important; max-width:40rem; }
-        .hero p { color:#d6def5; max-width:36rem; margin:.8rem 0 0; font-size:1rem; line-height:1.55; }
-        .starter-heading { font-size:.78rem; font-weight:700; letter-spacing:.11em; text-transform:uppercase; color:var(--muted); margin:1.6rem 0 .65rem; }
-        .stButton > button { min-height:2.55rem; border-radius:.7rem; border:1px solid #d9dfeb; background:var(--card); color:var(--ink); font-weight:650; transition:all .16s ease; }
-        .stButton > button:hover { border-color:var(--blue); color:var(--blue); transform:translateY(-1px); box-shadow:0 7px 17px rgba(68,76,111,.1); }
-        .starter-card .stButton > button { height:6.3rem; white-space:normal; text-align:left; padding:1rem; align-items:flex-start; background:#fff; }
-        .stButton > button[kind="primary"] { background:linear-gradient(110deg,var(--blue),var(--violet)); border:0; color:#fff; }
-        .stButton > button[kind="primary"]:hover { color:#fff; box-shadow:0 10px 22px rgba(79,70,229,.25); }
-        [data-testid="stChatMessage"] { background:#fff; border:1px solid var(--line); border-radius:1rem; padding:1rem 1.05rem; margin-bottom:.85rem; box-shadow:0 3px 14px rgba(23,32,51,.035); }
-        [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) { background:var(--blue-pale); border-color:#dce3ff; }
-        [data-testid="stChatInput"] { border:1px solid #d7deec; border-radius:1rem; background:#fff; box-shadow:0 10px 26px rgba(27,42,75,.08); }
-        [data-testid="stChatInput"] textarea { font-family:'DM Sans',sans-serif; }
-        div[data-baseweb="select"] > div,.stTextInput input { border-radius:.65rem !important; border-color:#d9dfeb !important; background:#fff !important; }
-        [data-testid="stMetric"] { background:#fff; border:1px solid var(--line); border-radius:1rem; padding:1rem 1.1rem; }
-        [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:1rem; overflow:hidden; background:#fff; }
-        [data-testid="stExpander"] { border:1px solid var(--line); border-radius:.9rem; background:#fff; }
-        .deck-toolbar { background:#fff; border:1px solid var(--line); border-radius:1rem; padding:1.25rem; margin:1rem 0 1.25rem; }
-        .deck-toolbar h3 { margin:0 0 .25rem; font-size:1.1rem; }
-        .deck-toolbar p { color:var(--muted); margin:0; font-size:.9rem; }
-        .stAlert { border-radius:.85rem; }
-        @media (max-width:700px) { .block-container { padding:1.35rem 1rem 2.25rem; } .hero { padding:1.65rem; } .workspace-top { margin-bottom:1.25rem; } }
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,500;0,600;0,700;1,500;1,600&display=swap');
+
+        :root {
+            --bg-app: #FAF9F6;
+            --bg-card: #FFFFFF;
+            --bg-sidebar: #F7F6F2;
+            --text-main: #18181B;
+            --text-muted: #6E6D76;
+            --text-subtle: #9896A0;
+            --border-light: #EBE8E1;
+            --border-hover: #D4CEBF;
+            --border-focus: #18181B;
+            --accent-gold: #9E7449;
+            --accent-gold-pale: #F3EFE8;
+            --accent-green: #2E6B47;
+            --shadow-subtle: 0 1px 3px rgba(0,0,0,0.02), 0 6px 18px -4px rgba(40, 35, 25, 0.04);
+            --shadow-card: 0 2px 8px rgba(0,0,0,0.02), 0 14px 34px -6px rgba(40, 35, 25, 0.05);
+        }
+
+        /* App Canvas */
+        .stApp {
+            background-color: var(--bg-app) !important;
+            color: var(--text-main) !important;
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif !important;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* App Header */
+        [data-testid="stHeader"] {
+            background: rgba(250, 249, 246, 0.88) !important;
+            backdrop-filter: blur(14px) !important;
+            -webkit-backdrop-filter: blur(14px) !important;
+            border-bottom: 1px solid var(--border-light) !important;
+        }
+
+        /* Sidebar Styling - Light, Airy, Luxury */
+        [data-testid="stSidebar"] {
+            background-color: var(--bg-sidebar) !important;
+            border-right: 1px solid #E8E5DC !important;
+        }
+
+        [data-testid="stSidebar"] > div:first-child {
+            padding: 1.5rem 1.15rem 2rem !important;
+        }
+
+        [data-testid="stSidebar"] * {
+            color: var(--text-main);
+        }
+
+        [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {
+            color: var(--text-subtle) !important;
+            font-size: 0.82rem !important;
+        }
+
+        [data-testid="stSidebar"] .stTextInput label,
+        [data-testid="stSidebar"] .stSelectbox label {
+            color: #55545B !important;
+            font-size: 0.72rem !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.08em !important;
+            text-transform: uppercase !important;
+        }
+
+        [data-testid="stSidebar"] div[data-baseweb="select"] > div,
+        [data-testid="stSidebar"] .stTextInput input {
+            background: #FFFFFF !important;
+            border: 1px solid #DFDBD2 !important;
+            color: #18181B !important;
+            border-radius: 10px !important;
+            font-size: 0.88rem !important;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.02) !important;
+            transition: all 0.15s ease !important;
+        }
+
+        [data-testid="stSidebar"] div[data-baseweb="select"] > div:hover,
+        [data-testid="stSidebar"] .stTextInput input:hover {
+            border-color: #C0BCB3 !important;
+        }
+
+        [data-testid="stSidebar"] div[data-baseweb="select"] > div:focus-within,
+        [data-testid="stSidebar"] .stTextInput input:focus {
+            border-color: #18181B !important;
+            box-shadow: 0 0 0 2px rgba(24, 24, 27, 0.08) !important;
+        }
+
+        /* Sidebar Buttons */
+        [data-testid="stSidebar"] .stButton > button {
+            background: #FFFFFF !important;
+            border: 1px solid #E8E4DB !important;
+            color: #2D2D33 !important;
+            text-align: left !important;
+            border-radius: 10px !important;
+            padding: 0.58rem 0.8rem !important;
+            font-size: 0.86rem !important;
+            font-weight: 550 !important;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.02) !important;
+            transition: all 0.16s ease !important;
+        }
+
+        [data-testid="stSidebar"] .stButton > button:hover {
+            background: #F3EFE7 !important;
+            border-color: #D8D2C4 !important;
+            color: #111111 !important;
+            transform: translateY(-1px) !important;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.04) !important;
+        }
+
+        [data-testid="stSidebar"] .stButton > button:disabled {
+            background: #EFECE4 !important;
+            border-color: #D6CFBF !important;
+            color: #18181B !important;
+            font-weight: 650 !important;
+            opacity: 1 !important;
+        }
+
+        /* New Conversation Button */
+        [data-testid="stSidebar"] .stButton > button[kind="primary"] {
+            background: #18181B !important;
+            border: 1px solid #27272A !important;
+            color: #FAF8F5 !important;
+            text-align: center !important;
+            border-radius: 10px !important;
+            padding: 0.65rem 0.9rem !important;
+            font-weight: 600 !important;
+            box-shadow: 0 4px 14px rgba(24,24,27,0.12) !important;
+        }
+
+        [data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+            background: #27272A !important;
+            transform: translateY(-1px) !important;
+            box-shadow: 0 6px 18px rgba(24,24,27,0.18) !important;
+        }
+
+        /* Sidebar Radio Pills */
+        [data-testid="stSidebar"] [data-testid="stRadio"] {
+            background: #EFECE5;
+            border-radius: 12px;
+            padding: 4px;
+            gap: 2px;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stRadio"] label {
+            width: 100%;
+            padding: 0.55rem 0.8rem;
+            border-radius: 8px;
+            font-size: 0.88rem;
+            font-weight: 500;
+            color: #55545B;
+            transition: all 0.15s ease;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {
+            background: #FFFFFF !important;
+            color: #18181B !important;
+            font-weight: 650 !important;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.05) !important;
+        }
+
+        [data-testid="stSidebar"] [data-testid="stRadio"] input {
+            display: none;
+        }
+
+        /* Typography & Headings */
+        h1, h2, h3 {
+            color: var(--text-main) !important;
+            letter-spacing: -0.02em;
+        }
+
+        h1 {
+            font-family: 'Playfair Display', Georgia, serif !important;
+            font-weight: 600 !important;
+            font-size: clamp(2rem, 3.8vw, 2.9rem) !important;
+            line-height: 1.15 !important;
+        }
+
+        h2 {
+            font-size: 1.28rem !important;
+            font-weight: 650 !important;
+            margin-top: 1.6rem !important;
+        }
+
+        .block-container {
+            max-width: 1080px;
+            padding: 2.2rem 2.4rem 4rem;
+        }
+
+        /* Brand Emblem */
+        .focusly-brand {
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+            padding: 0.2rem 0.2rem 1.6rem;
+            border-bottom: 1px solid #EAE6DD;
+            margin-bottom: 1rem;
+        }
+
+        .focusly-mark {
+            display: grid;
+            place-items: center;
+            width: 2.3rem;
+            height: 2.3rem;
+            border-radius: 9px;
+            background: #18181B;
+            color: #F8F5EE;
+            font-family: 'Playfair Display', Georgia, serif;
+            font-weight: 600;
+            font-style: italic;
+            font-size: 1.2rem;
+            box-shadow: 0 4px 12px rgba(24, 24, 27, 0.15);
+        }
+
+        .focusly-brand strong {
+            display: block;
+            color: #18181B;
+            font-size: 1.18rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        .focusly-brand span {
+            display: block;
+            color: #8C8A84;
+            font-size: 0.72rem;
+            letter-spacing: 0.02em;
+        }
+
+        .sidebar-section {
+            color: #828078;
+            font-size: 0.69rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.11em;
+            padding: 0.95rem 0.3rem 0.4rem;
+        }
+
+        .workspace-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 1.6rem;
+            padding-bottom: 0.7rem;
+            border-bottom: 1px solid var(--border-light);
+        }
+
+        .workspace-label {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--text-muted);
+            font-size: 0.82rem;
+            font-weight: 600;
+        }
+
+        .status-dot {
+            width: 0.45rem;
+            height: 0.45rem;
+            border-radius: 50%;
+            background: #2E6B47;
+            box-shadow: 0 0 0 3px #E5EFE6;
+        }
+
+        /* Hero Card - Editorial Luxury */
+        .hero {
+            position: relative;
+            overflow: hidden;
+            padding: 2.6rem 2.8rem;
+            border-radius: 22px;
+            background: linear-gradient(135deg, #FFFFFF 0%, #FAF8F5 55%, #F4EFE6 100%);
+            border: 1px solid #EAE4D8;
+            box-shadow: var(--shadow-card);
+            margin-bottom: 1.6rem;
+        }
+
+        .hero-kicker {
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--accent-gold);
+            margin-bottom: 0.7rem;
+        }
+
+        .hero h1 {
+            color: #18181B !important;
+            max-width: 38rem;
+            margin: 0 !important;
+        }
+
+        .hero p {
+            color: #55535E;
+            max-width: 35rem;
+            margin: 0.9rem 0 0;
+            font-size: 0.98rem;
+            line-height: 1.62;
+        }
+
+        /* Starter Prompt Cards */
+        .starter-heading {
+            font-size: 0.73rem;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin: 1.5rem 0 0.75rem;
+        }
+
+        .starter-card .stButton > button {
+            height: 6.8rem !important;
+            white-space: normal !important;
+            text-align: left !important;
+            padding: 1rem 1.15rem !important;
+            align-items: flex-start !important;
+            background: #FFFFFF !important;
+            border: 1px solid var(--border-light) !important;
+            border-radius: 14px !important;
+            color: #1A1A1E !important;
+            box-shadow: var(--shadow-subtle) !important;
+            transition: all 0.18s ease !important;
+        }
+
+        .starter-card .stButton > button:hover {
+            border-color: #C5A880 !important;
+            box-shadow: 0 8px 24px -4px rgba(197, 168, 128, 0.18) !important;
+            transform: translateY(-2px) !important;
+            color: #111 !important;
+        }
+
+        /* General Buttons */
+        .stButton > button {
+            min-height: 2.5rem;
+            border-radius: 10px;
+            border: 1px solid var(--border-light);
+            background: #FFFFFF;
+            color: #18181B;
+            font-weight: 600;
+            font-size: 0.88rem;
+            transition: all 0.16s ease;
+        }
+
+        .stButton > button:hover {
+            border-color: #18181B;
+            color: #18181B;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 14px rgba(0,0,0,0.05);
+        }
+
+        .stButton > button[kind="primary"] {
+            background: #18181B !important;
+            border: 1px solid #18181B !important;
+            color: #FAF8F5 !important;
+        }
+
+        .stButton > button[kind="primary"]:hover {
+            background: #27272A !important;
+            box-shadow: 0 6px 18px rgba(24,24,27,0.12) !important;
+        }
+
+        /* Chat Messages */
+        [data-testid="stChatMessage"] {
+            background: #FFFFFF;
+            border: 1px solid var(--border-light);
+            border-radius: 18px;
+            padding: 1.15rem 1.35rem;
+            margin-bottom: 0.95rem;
+            box-shadow: var(--shadow-subtle);
+            line-height: 1.65;
+            color: #1C1D22;
+        }
+
+        [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
+            background: #F4F1EA !important;
+            border-color: #E8E2D5 !important;
+            border-radius: 18px 18px 4px 18px !important;
+        }
+
+        /* Chat Input */
+        [data-testid="stChatInput"] {
+            border: 1.5px solid #DFDBD2 !important;
+            border-radius: 18px !important;
+            background: #FFFFFF !important;
+            box-shadow: 0 10px 32px -6px rgba(40, 35, 25, 0.07) !important;
+            transition: border-color 0.15s ease, box-shadow 0.15s ease !important;
+        }
+
+        [data-testid="stChatInput"]:focus-within {
+            border-color: #18181B !important;
+            box-shadow: 0 12px 36px -4px rgba(24, 24, 27, 0.1) !important;
+        }
+
+        [data-testid="stChatInput"] textarea {
+            font-family: 'Plus Jakarta Sans', sans-serif !important;
+            font-size: 0.96rem !important;
+            color: #18181B !important;
+        }
+
+        /* Form inputs & selectboxes on page */
+        div[data-baseweb="select"] > div, .stTextInput input {
+            border-radius: 10px !important;
+            border-color: #E0DCD3 !important;
+            background: #FFFFFF !important;
+        }
+
+        /* Metrics Cards */
+        [data-testid="stMetric"] {
+            background: #FFFFFF !important;
+            border: 1px solid var(--border-light) !important;
+            border-radius: 14px !important;
+            padding: 1.1rem 1.25rem !important;
+            box-shadow: var(--shadow-subtle) !important;
+        }
+
+        [data-testid="stMetric"] label {
+            color: var(--text-muted) !important;
+            font-size: 0.78rem !important;
+            font-weight: 600 !important;
+            text-transform: uppercase !important;
+            letter-spacing: 0.05em !important;
+        }
+
+        [data-testid="stMetric"] [data-testid="stMetricValue"] {
+            font-family: 'Playfair Display', Georgia, serif !important;
+            font-size: 1.85rem !important;
+            font-weight: 600 !important;
+            color: #18181B !important;
+        }
+
+        /* Dataframe & Expanders */
+        [data-testid="stDataFrame"] {
+            border: 1px solid var(--border-light) !important;
+            border-radius: 14px !important;
+            overflow: hidden !important;
+            background: #FFFFFF !important;
+            box-shadow: var(--shadow-subtle) !important;
+        }
+
+        [data-testid="stExpander"] {
+            border: 1px solid var(--border-light) !important;
+            border-radius: 12px !important;
+            background: #FFFFFF !important;
+        }
+
+        .deck-toolbar {
+            background: #FFFFFF;
+            border: 1px solid var(--border-light);
+            border-radius: 16px;
+            padding: 1.35rem 1.5rem;
+            margin: 1.1rem 0 1.25rem;
+            box-shadow: var(--shadow-subtle);
+        }
+
+        .deck-toolbar h3 {
+            margin: 0 0 0.25rem;
+            font-size: 1.12rem;
+            font-weight: 650;
+        }
+
+        .deck-toolbar p {
+            color: var(--text-muted);
+            margin: 0;
+            font-size: 0.88rem;
+        }
+
+        /* Note Cards in Sidebar */
+        .note-card {
+            background: #FFFFFF;
+            border: 1px solid #EBE7DF;
+            border-radius: 10px;
+            padding: 0.65rem 0.85rem;
+            margin-bottom: 0.45rem;
+            font-size: 0.84rem;
+            color: #2D2D33;
+            display: flex;
+            align-items: flex-start;
+            gap: 0.5rem;
+            line-height: 1.45;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+        }
+
+        .note-diamond {
+            color: var(--accent-gold);
+            font-size: 0.72rem;
+            line-height: 1.4;
+            flex-shrink: 0;
+        }
+
+        /* Action Authorization Dialog */
+        .action-card {
+            background: #FFFFFF;
+            border: 1px solid #EAE5DB;
+            border-radius: 16px;
+            padding: 1.2rem 1.4rem;
+            margin-bottom: 0.8rem;
+            box-shadow: var(--shadow-subtle);
+        }
+
+        .action-badge {
+            display: inline-block;
+            font-size: 0.7rem;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: #9E7449;
+            background: #F8F5EE;
+            border: 1px solid #EAE3D4;
+            padding: 3px 10px;
+            border-radius: 999px;
+            margin-bottom: 0.4rem;
+        }
+
+        /* Audio Player */
+        audio {
+            height: 38px;
+            border-radius: 999px;
+        }
+
+        @media (max-width: 700px) {
+            .block-container { padding: 1.4rem 1.1rem 2.5rem; }
+            .hero { padding: 1.8rem 1.5rem; }
+            .workspace-top { margin-bottom: 1.2rem; }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -143,7 +610,7 @@ def open_chat(chat_id: str):
 
 # -------------------------------------------------------------- sidebar
 with st.sidebar:
-    st.markdown("<div class='focusly-brand'><div class='focusly-mark'>F</div><div><strong>Focusly</strong><span>Learn with clarity</span></div></div>", unsafe_allow_html=True)
+    st.markdown("<div class='focusly-brand'><div class='focusly-mark'>F</div><div><strong>Focusly</strong><span>Executive Study Atelier</span></div></div>", unsafe_allow_html=True)
     st.markdown("<div class='sidebar-section'>Workspace</div>", unsafe_allow_html=True)
     page = st.radio("Page", ["Chat", "Flashcards"], label_visibility="collapsed")
     st.markdown("<div class='sidebar-section'>Study profile</div>", unsafe_allow_html=True)
@@ -169,12 +636,14 @@ state = run(agent.aget_state(config))  # everything saved for this chat: message
 values = state.values if state and state.values else {}
 
 with st.sidebar:
-    st.subheader("📝 Notes")
+    st.markdown("<div class='sidebar-section'>Study notes</div>", unsafe_allow_html=True)
     saved_notes = notes_store.load()
-    for n in saved_notes:
-        st.markdown(f"- {n}")
-    if not saved_notes:
-        st.caption("Ask me to save a note.")
+    if saved_notes:
+        for n in saved_notes:
+            safe_n = html.escape(n)
+            st.markdown(f"<div class='note-card'><span class='note-diamond'>✦</span><span>{safe_n}</span></div>", unsafe_allow_html=True)
+    else:
+        st.caption("Ask the tutor to save a note anytime.")
 
 
 # =================================================================== chat
@@ -224,26 +693,26 @@ def call_agent(payload):
 
 def chat_page():
     messages = history(values.get("messages", []))
-    st.markdown("<div class='workspace-top'><div class='workspace-label'><span class='status-dot'></span> Focus session active</div><div class='workspace-label'>AI study workspace</div></div>", unsafe_allow_html=True)
+    st.markdown("<div class='workspace-top'><div class='workspace-label'><span class='status-dot'></span> Study Atelier Active</div><div class='workspace-label'>Personalized Learning Studio</div></div>", unsafe_allow_html=True)
     quick_prompt = None
     if not messages:
         safe_name = html.escape(user_name or "there")
-        st.markdown(f"<section class='hero'><div class='hero-kicker'>Your learning space</div><h1>Make your next study session count, {safe_name}.</h1><p>Ask for a clear explanation, turn a topic into flashcards, or bring in an image you want to understand.</p></section>", unsafe_allow_html=True)
-        st.markdown("<div class='starter-heading'>Start with a guided prompt</div>", unsafe_allow_html=True)
+        st.markdown(f"<section class='hero'><div class='hero-kicker'>✦ Personalized Learning Studio</div><h1>Make your next study session count, {safe_name}.</h1><p>Explore ideas with clarity, master challenging concepts through custom flashcards, or inspect diagrams with vision AI.</p></section>", unsafe_allow_html=True)
+        st.markdown("<div class='starter-heading'>Guided study prompts</div>", unsafe_allow_html=True)
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown("<div class='starter-card'>", unsafe_allow_html=True)
-            if st.button("Explain a difficult topic simply", key="starter_explain", use_container_width=True):
+            if st.button("💡 Explain simply\nBreak down complex ideas into intuitive, memorable concepts", key="starter_explain", use_container_width=True):
                 quick_prompt = "Explain a difficult topic to me in simple terms."
             st.markdown("</div>", unsafe_allow_html=True)
         with c2:
             st.markdown("<div class='starter-card'>", unsafe_allow_html=True)
-            if st.button("Create a focused revision plan", key="starter_plan", use_container_width=True):
+            if st.button("📋 Revision plan\nBuild a structured, milestone-based study routine", key="starter_plan", use_container_width=True):
                 quick_prompt = "Create a focused revision plan for me."
             st.markdown("</div>", unsafe_allow_html=True)
         with c3:
             st.markdown("<div class='starter-card'>", unsafe_allow_html=True)
-            if st.button("Turn a topic into flashcards", key="starter_cards", use_container_width=True):
+            if st.button("🃏 Flashcard deck\nTurn what you're learning into active recall cards", key="starter_cards", use_container_width=True):
                 quick_prompt = "Make me flashcards for a topic I am studying."
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -260,14 +729,31 @@ def chat_page():
 
     if pending:
         with st.chat_message("assistant"):
-            st.warning("I need your approval before doing this:")
+            st.markdown(
+                """
+                <div class='action-card'>
+                    <span class='action-badge'>Authorization Required</span>
+                    <h4 style='margin:0.2rem 0 0.4rem;font-size:1.05rem;color:#18181B;font-weight:650;'>Permission requested to perform an external action</h4>
+                    <p style='margin:0;color:#5E5D66;font-size:0.9rem;'>The tutor needs your confirmation before continuing with this operation:</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
             for r in pending:
-                st.code(f"{r['name']}({r['args']})", language="python")
+                action_name = r.get("name", "Action")
+                action_args = r.get("args", {})
+                arg_desc = ", ".join(f"{k}: {v}" for k, v in action_args.items()) if isinstance(action_args, dict) else str(action_args)
+                st.markdown(
+                    f"<div style='background:#F8F7F4;border:1px solid #EAE5DC;border-radius:10px;padding:0.75rem 1rem;margin-bottom:0.75rem;font-size:0.88rem;color:#1C1D22;'>"
+                    f"<strong style='color:#18181B;margin-right:0.6rem;'>✦ {html.escape(action_name)}</strong> <span style='color:#55535E;'>{html.escape(arg_desc)}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
             col1, col2 = st.columns(2)
             decision = None
-            if col1.button("✅ Approve"):
+            if col1.button("✅ Authorize Action", type="primary", use_container_width=True):
                 decision = {"type": "approve"}
-            if col2.button("❌ Reject"):
+            if col2.button("❌ Decline", use_container_width=True):
                 decision = {"type": "reject", "message": "User said no."}
         if decision:
             call_agent(Command(resume={"decisions": [decision] * len(pending)}))
@@ -307,39 +793,57 @@ def show_html(code: str, height: int) -> None:
 
 
 def flip_card(concept: str, question: str, answer: str) -> None:
-    """A real 3D flip card (pure CSS/JS in an iframe). Click it to flip."""
+    """A real 3D flip card with heavy stationery luxury aesthetic. Click it to flip."""
     c, q, a = html.escape(concept), html.escape(question), html.escape(answer)
     show_html(
         f"""
 <style>
-  body {{ margin: 0; font-family: system-ui, -apple-system, sans-serif; }}
-  .scene {{ perspective: 1100px; width: 100%; max-width: 580px; height: 270px; margin: 0 auto;
-            animation: pop .45s ease-out; }}
-  .card {{ position: relative; width: 100%; height: 100%; cursor: pointer;
-           transition: transform .7s cubic-bezier(.4,.2,.2,1); transform-style: preserve-3d; }}
+  @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700&family=Playfair+Display:ital,wght@0,500;0,600;1,500&display=swap');
+  body {{ margin: 0; background: transparent; font-family: 'Plus Jakarta Sans', -apple-system, sans-serif; }}
+  .scene {{ perspective: 1200px; width: 100%; max-width: 580px; height: 280px; margin: 0 auto; animation: pop .4s cubic-bezier(0.16, 1, 0.3, 1); }}
+  .card {{ position: relative; width: 100%; height: 100%; cursor: pointer; transition: transform .65s cubic-bezier(.4,.2,.2,1); transform-style: preserve-3d; }}
   .card.flipped {{ transform: rotateY(180deg); }}
-  .face {{ position: absolute; inset: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden;
-           border-radius: 18px; padding: 24px; box-sizing: border-box; color: white; text-align: center;
-           display: flex; flex-direction: column; align-items: center; justify-content: center;
-           box-shadow: 0 10px 30px rgba(0,0,0,.28); }}
-  .front {{ background: linear-gradient(135deg, #6366f1, #8b5cf6); }}
-  .back  {{ background: linear-gradient(135deg, #0ea5e9, #10b981); transform: rotateY(180deg); }}
-  .tag   {{ font-size: 12px; letter-spacing: .12em; text-transform: uppercase; opacity: .8; margin-bottom: 12px; }}
-  .text  {{ font-size: 22px; line-height: 1.35; font-weight: 600; max-height: 170px; overflow-y: auto; }}
-  .hint  {{ position: absolute; bottom: 12px; font-size: 12px; opacity: .7; }}
-  @keyframes pop {{ from {{ opacity: 0; transform: translateY(16px) scale(.96); }}
-                    to   {{ opacity: 1; transform: none; }} }}
+  .face {{ position: absolute; inset: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden; border-radius: 22px; padding: 28px 34px; box-sizing: border-box; text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; }}
+  
+  .front {{ 
+    background: linear-gradient(145deg, #FFFFFF 0%, #FAF8F5 100%); 
+    border: 1.5px solid #E6E1D6; 
+    box-shadow: 0 16px 40px -10px rgba(50, 45, 35, 0.08), 0 2px 6px rgba(0,0,0,0.02); 
+    color: #1A1A1E; 
+  }}
+  .front .text {{ font-family: 'Playfair Display', Georgia, serif; font-size: 23px; font-weight: 550; font-style: italic; line-height: 1.4; color: #18181B; max-height: 160px; overflow-y: auto; }}
+  .front .tag {{ background: #F3EFE8; color: #8A6538; border: 1px solid #E5DFD4; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; font-weight: 700; border-radius: 999px; padding: 4px 12px; margin-bottom: 16px; }}
+  .front .hint {{ position: absolute; bottom: 14px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #9A958A; font-weight: 600; }}
+
+  .back {{ 
+    background: linear-gradient(145deg, #FCFDFC 0%, #F1F6F2 100%); 
+    border: 1.5px solid #D6E4D8; 
+    box-shadow: 0 16px 40px -10px rgba(35, 50, 40, 0.08), 0 2px 6px rgba(0,0,0,0.02); 
+    color: #1A281F; 
+    transform: rotateY(180deg); 
+  }}
+  .back .text {{ font-family: 'Plus Jakarta Sans', sans-serif; font-size: 19px; font-weight: 550; line-height: 1.45; color: #18281F; max-height: 160px; overflow-y: auto; }}
+  .back .tag {{ background: #E5EFE6; color: #2E6B47; border: 1px solid #D0E2D3; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; font-weight: 700; border-radius: 999px; padding: 4px 12px; margin-bottom: 16px; }}
+  .back .hint {{ position: absolute; bottom: 14px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #728A7A; font-weight: 600; }}
+
+  @keyframes pop {{ from {{ opacity: 0; transform: translateY(14px) scale(.98); }} to {{ opacity: 1; transform: none; }} }}
 </style>
 <div class="scene">
   <div class="card" onclick="this.classList.toggle('flipped')">
-    <div class="face front"><div class="tag">{c} &middot; question</div><div class="text">{q}</div>
-      <div class="hint">click the card to flip</div></div>
-    <div class="face back"><div class="tag">answer</div><div class="text">{a}</div>
-      <div class="hint">click to flip back</div></div>
+    <div class="face front">
+      <div class="tag">{c} &middot; Question</div>
+      <div class="text">{q}</div>
+      <div class="hint">Click anywhere to reveal answer ↺</div>
+    </div>
+    <div class="face back">
+      <div class="tag">Answer</div>
+      <div class="text">{a}</div>
+      <div class="hint">Click to flip back ↺</div>
+    </div>
   </div>
 </div>
 """.strip(),
-        height=300,
+        height=310,
     )
 
 
@@ -381,7 +885,7 @@ def overview(decks: dict) -> None:
     one.metric("Study decks", len(decks))
     two.metric("Cards saved", total_cards)
     three.metric("Cards reviewed", reviewed)
-    st.markdown("<div class='deck-toolbar'><h3>Choose your next review</h3><p>Pick a deck and set the practice mode that works for this session.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='deck-toolbar'><h3>Select Deck to Practice</h3><p>Choose a concept below and target all cards or focus specifically on missed items.</p></div>", unsafe_allow_html=True)
     st.dataframe(rows, hide_index=True, use_container_width=True)
 
     concept = st.selectbox("Pick a concept to study", list(decks))
@@ -443,8 +947,8 @@ def study_view(decks: dict) -> None:
 
 
 def flashcards_page():
-    st.markdown("<div class='workspace-top'><div class='workspace-label'><span class='status-dot'></span> Recall practice</div><div class='workspace-label'>Your study library</div></div>", unsafe_allow_html=True)
-    st.markdown("<section class='hero'><div class='hero-kicker'>Flashcard library</div><h1>Build knowledge that sticks.</h1><p>Use short, focused practice sessions and revisit the cards that need another pass.</p></section>", unsafe_allow_html=True)
+    st.markdown("<div class='workspace-top'><div class='workspace-label'><span class='status-dot'></span> Active Recall Studio</div><div class='workspace-label'>Personal Study Decks</div></div>", unsafe_allow_html=True)
+    st.markdown("<section class='hero'><div class='hero-kicker'>✦ Active Recall Library</div><h1>Build knowledge that endures.</h1><p>Master complex topics through high-retention 3D flashcards. Review full decks or focus specifically on cards you missed.</p></section>", unsafe_allow_html=True)
     decks = cards_store.load()
     if not decks:
         st.info("No flashcards yet. Go to the Chat page and ask: *make me flashcards about short-term memory*.")
