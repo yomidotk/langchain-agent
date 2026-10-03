@@ -18,3 +18,10 @@ def add(note: str) -> int:
     notes.append(note)
     PATH.write_text(json.dumps(notes, indent=2, ensure_ascii=False), encoding="utf-8")
     return len(notes)
+
+
+def delete(index: int) -> None:
+    notes = load()
+    if 0 <= index < len(notes):
+        notes.pop(index)
+        PATH.write_text(json.dumps(notes, indent=2, ensure_ascii=False), encoding="utf-8")
