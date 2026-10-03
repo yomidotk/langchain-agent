@@ -4,7 +4,7 @@ Course topic            -> where it shows up below
 ---------------------------------------------------------------
 Create Agent            -> create_agent(...) in build_agent()
 Foundational Models     -> make_model() + FAST / SMART models
-Tools                   -> get_time, save_note, send_email, ...
+Tools                   -> get_time, save_note, create_flashcards, send_email, ...
 Short-Term Memory       -> InMemorySaver + thread_id
 Multimodal Messages     -> image_message() + Alibaba vision model
 MCP                     -> MultiServerMCPClient + mcp_server.py
@@ -27,6 +27,7 @@ from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
+from pydantic import BaseModel
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -43,6 +44,8 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 from typing_extensions import NotRequired
+
+import cards_store
 
 load_dotenv()
 HERE = Path(__file__).parent
@@ -129,6 +132,19 @@ def list_notes(runtime: ToolRuntime) -> str:
     return "\n".join(f"{i + 1}. {n}" for i, n in enumerate(notes)) or "No notes yet."
 
 
+class Card(BaseModel):
+    question: str
+    answer: str
+
+
+@tool
+def create_flashcards(concept: str, cards: list[Card]) -> str:
+    """Create a deck of flashcards for a concept. Give 5-8 clear question/answer pairs.
+    The student studies them on the Flashcards page of the app."""
+    n = cards_store.add_cards(concept, [c.model_dump() for c in cards])
+    return f"Created {n} flashcards for '{concept}'. Tell the student to open the Flashcards page to study them."
+
+
 @tool
 def send_email(to: str, subject: str, body: str) -> str:
     """Send an email. (Fake sender for the demo: it only prints.)
@@ -166,7 +182,8 @@ def personalize(request: ModelRequest) -> str:
     return (
         "You are Study Buddy, a friendly AI tutor.\n"
         f"The student is {ctx.user_name}, level: {ctx.level}. Adapt your explanations to that level.\n"
-        "Use tools when they help: notes for things worth remembering, make_quiz for quizzes. "
+        "Use tools when they help: notes for things worth remembering, make_quiz for quizzes, "
+        "create_flashcards when asked for flashcards (the student studies them on the Flashcards page). "
         "Never send an email without being asked."
     )
 
@@ -186,7 +203,7 @@ class ModelRouter(AgentMiddleware):
 
 # -------------------------------------------------------------- Agent
 def build_agent(extra_tools=(), checkpointer=None):
-    tools = [get_time, get_profile, save_note, list_notes, send_email, build_quiz_tool(), *extra_tools]
+    tools = [get_time, get_profile, save_note, list_notes, create_flashcards, send_email, build_quiz_tool(), *extra_tools]
 
     return create_agent(
         model=FAST,
