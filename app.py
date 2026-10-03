@@ -23,7 +23,7 @@ import cards_store  # noqa: E402
 import chat_index  # noqa: E402
 import notes_store  # noqa: E402
 import tts  # noqa: E402
-from agent import HERE, LANGUAGES, Context, build_agent, describe_image, secret  # noqa: E402
+from agent import HERE, QUIZ_ANSWERS_MARK, Context, build_agent, describe_image, secret  # noqa: E402
 
 st.markdown(
     """
@@ -81,7 +81,6 @@ run, agent = get_runtime()
 ss = st.session_state
 ss.setdefault("study", None)  # current flashcard session
 ss.setdefault("playing", None)  # which answer is being read aloud
-ss.setdefault("lang", "Match my language")  # answer language (chosen with the pills in the chat)
 PAGES = ["💬 Chat", "🃏 Flashcards", "📝 Notes"]
 ss.setdefault("page", PAGES[0])
 
@@ -129,7 +128,7 @@ values = state.values if state and state.values else {}
 
 
 def make_context() -> Context:  # runtime context, built fresh for every call so settings apply right away
-    return Context(user_name=ss.get("name", "friend"), level=ss.get("level", "intermediate"), language=ss.lang)
+    return Context(user_name=ss.get("name", "friend"), level=ss.get("level", "intermediate"))
 
 
 # =================================================================== chat
@@ -143,16 +142,27 @@ SUGGESTIONS = [
 
 
 def history(messages):
-    """Turn the saved agent messages into chat bubbles (skip tool calls and summaries)."""
+    """Turn the saved agent messages into chat bubbles: (role, text, kind). Tool calls are hidden,
+    except quizzes, whose text would otherwise never reach the screen."""
     out = []
     for m in messages:
         if m.additional_kwargs.get("lc_source") == "summarization":
             continue
         if m.type == "human":
-            out.append(("user", IMAGE_TAIL.sub("\n\n🖼️ *image attached*", m.text)))
+            out.append(("user", IMAGE_TAIL.sub("\n\n🖼️ *image attached*", m.text), "chat"))
+        elif m.type == "tool" and m.name == "make_quiz" and m.text.strip():
+            out.append(("assistant", m.text, "quiz"))
         elif m.type == "ai" and m.text.strip():
-            out.append(("assistant", m.text))
+            out.append(("assistant", m.text, "chat"))
     return out
+
+
+def render_quiz(text: str):
+    quiz, _, answers = text.partition(QUIZ_ANSWERS_MARK)
+    st.markdown("📝 **Quiz time!**\n\n" + quiz.strip())
+    if answers.strip():
+        with st.expander("Show the answers"):
+            st.markdown(answers.strip())
 
 
 def mostly_arabic(text: str) -> bool:
@@ -162,8 +172,8 @@ def mostly_arabic(text: str) -> bool:
 
 def listen_ui(i: int, text: str):
     """A 🔊 Listen button under an answer. Click it to hear the answer instead of reading it."""
-    if ss.lang.startswith("Darija") or mostly_arabic(text):  # Qwen-TTS has no Darija/Arabic voice
-        st.caption("🔇 Voice isn't available for Darija yet. Switch the answer language to English or Français to listen.")
+    if mostly_arabic(text):  # Qwen-TTS has no Arabic/Darija voice
+        st.caption("🔇 Voice isn't available for Arabic or Darija text yet.")
         return
     key = f"{thread_id}_{i}"
     fresh = st.button("🔊 Listen", key=f"listen_{key}")
@@ -204,12 +214,7 @@ def send(text: str, files=None):
 
 
 def chat_page():
-    title("Chat", "Ask anything, attach a screenshot, or turn what you learn into flashcards.")
-    choice = st.pills("Answer language", list(LANGUAGES), default=ss.lang, label_visibility="collapsed")
-    if choice:
-        ss.lang = choice
-    st.caption(f"🌍 Answers in: **{ss.lang}**. Change it anytime, it applies to your next message.")
-
+    title("Chat", "Ask anything, attach a screenshot, or turn what you learn into flashcards and quizzes.")
     queued = ss.pop("queued", None)
     messages = history(values.get("messages", []))
 
@@ -219,8 +224,11 @@ def chat_page():
         for i, suggestion in enumerate(SUGGESTIONS):
             cols[i % 2].button(suggestion, key=f"sug{i}", on_click=queue_prompt, args=(suggestion,))
 
-    for i, (role, text) in enumerate(messages):
+    for i, (role, text, kind) in enumerate(messages):
         with st.chat_message(role):
+            if kind == "quiz":
+                render_quiz(text)
+                continue
             st.markdown(text)
             if role == "assistant" and has_tts:
                 listen_ui(i, text)
