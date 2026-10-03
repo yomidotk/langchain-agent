@@ -20,6 +20,7 @@ from langgraph.types import Command
 st.set_page_config(page_title="Study Buddy", page_icon="📚")
 
 import cards_store  # noqa: E402
+import session_store  # noqa: E402
 from agent import HERE, Context, build_agent, describe_image, secret  # noqa: E402
 
 if not secret("DO_API_KEY"):
@@ -47,72 +48,33 @@ def get_runtime():
 
 run, agent = get_runtime()
 
-# ---------------------------------------------------------------- state
+# ---------------------------------------------------------------- session & state
+# Keep thread_id in query params so page refresh (F5) stays in the exact same session
+qp = st.query_params
+thread_id = qp.get("session")
+if not thread_id:
+    thread_id = str(uuid.uuid4())
+    qp["session"] = thread_id
+
 ss = st.session_state
-ss.setdefault("thread_id", str(uuid.uuid4()))
-ss.setdefault("messages", [])  # what we display: {"role", "content"}
-ss.setdefault("notes", [])  # persisted notes (agent state)
+ss.setdefault("thread_id", thread_id)
+if ss.thread_id != thread_id:
+    ss.thread_id = thread_id
+
+# Load saved session data (messages + notes) from session_store
+saved = session_store.get_session(ss.thread_id)
+if "messages" not in ss:
+    ss.messages = list(saved.get("messages", []))
+if "notes" not in ss:
+    ss.notes = list(saved.get("notes", []))
 ss.setdefault("pending", None)  # human-in-the-loop requests waiting for a decision
 ss.setdefault("study", None)  # current flashcard session
-ss.setdefault("_storage_loaded", False)  # whether we already loaded from browser localStorage
-
-# ── Browser localStorage bridge ───────────────────────────────────────────
-_LS_KEY = "study_buddy_chat"
 
 
-def _load_from_browser():
-    """On first run only, inject JS that reads localStorage and posts data back via query params."""
-    if ss._storage_loaded:
-        return
-    ss._storage_loaded = True
-    qp = st.query_params
-    raw = qp.get("_restore")
-    if raw:
-        try:
-            restored = _json.loads(raw)
-            if isinstance(restored, dict):
-                if restored.get("messages") and not ss.messages:
-                    ss.messages = restored["messages"]
-                if restored.get("thread_id"):
-                    ss.thread_id = restored["thread_id"]
-                if restored.get("notes") and not ss.notes:
-                    ss.notes = restored["notes"]
-        except Exception:
-            pass
-        # Clear the query param so it doesn't stick in the URL
-        qp.clear()
-        return
-    # First load — inject JS to read localStorage and reload with data
-    components.html(
-        f"""
-        <script>
-        const data = localStorage.getItem("{_LS_KEY}");
-        if (data) {{
-            const encoded = encodeURIComponent(data);
-            window.parent.location.search = "?_restore=" + encoded;
-        }}
-        </script>
-        """,
-        height=0,
-    )
+def _sync_session():
+    """Save current chat messages and notes to session_store."""
+    session_store.save_session(ss.thread_id, ss.messages, ss.notes)
 
-
-def _save_to_browser():
-    """Write current messages + thread_id + notes to browser localStorage (hidden 0-height iframe)."""
-    payload = _json.dumps({"messages": ss.messages, "thread_id": ss.thread_id, "notes": ss.notes})
-    # Escape for JS string literal
-    escaped = payload.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
-    components.html(
-        f"""
-        <script>
-        localStorage.setItem("{_LS_KEY}", `{escaped}`);
-        </script>
-        """,
-        height=0,
-    )
-
-
-_load_from_browser()
 
 # -------------------------------------------------------------- sidebar
 with st.sidebar:
@@ -121,18 +83,24 @@ with st.sidebar:
     user_name = st.text_input("Your name", "Chiraz")
     level = st.selectbox("Your level", ["beginner", "intermediate", "advanced"], index=1)
     if st.button("New conversation"):
-        ss.thread_id, ss.messages, ss.pending, ss.notes = str(uuid.uuid4()), [], None, []
-        _save_to_browser()  # clear localStorage too
+        new_id = str(uuid.uuid4())
+        ss.thread_id = new_id
+        ss.messages = []
+        ss.notes = []
+        ss.pending = None
+        st.query_params["session"] = new_id
+        session_store.save_session(new_id, [], [])
         st.rerun()
 
 config = {"configurable": {"thread_id": ss.thread_id}}
 context = Context(user_name=user_name, level=level)  # runtime context
 
-# Sync notes between agent state and session_state / localStorage
+# Sync notes between agent state and session_store
 state = run(agent.aget_state(config))
 agent_notes = (state.values.get("notes") or []) if state and state.values else []
 if agent_notes:
     ss.notes = agent_notes
+    _sync_session()
 elif ss.notes:
     # State in InMemorySaver was lost (e.g. on page refresh or restart), restore it into agent state
     run(agent.aupdate_state(config, {"notes": ss.notes}))
@@ -150,7 +118,7 @@ with st.sidebar:
             if new_note.strip():
                 ss.notes = list(ss.notes) + [new_note.strip()]
                 run(agent.aupdate_state(config, {"notes": ss.notes}))
-                _save_to_browser()
+                _sync_session()
                 st.rerun()
 
 
@@ -167,7 +135,7 @@ def call_agent(payload):
         state = run(agent.aget_state(config))
         if state and state.values and "notes" in state.values:
             ss.notes = state.values.get("notes") or []
-        _save_to_browser()
+        _sync_session()
 
 
 def chat_page():
@@ -213,7 +181,7 @@ def chat_page():
             to_agent = f"{text}\n\n[Attached image, described by a vision model: {description}]"
             shown = f"{text}\n\n🖼️ *{f.name} attached*"
         ss.messages.append({"role": "user", "content": shown})
-        _save_to_browser()
+        _sync_session()
         call_agent({"messages": [{"role": "user", "content": to_agent}]})
         st.rerun()
 
