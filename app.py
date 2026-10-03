@@ -22,6 +22,7 @@ st.set_page_config(page_title="Study Buddy", page_icon="📚", layout="centered"
 import cards_store  # noqa: E402
 import chat_index  # noqa: E402
 import notes_store  # noqa: E402
+import organizer  # noqa: E402
 import tts  # noqa: E402
 from agent import HERE, QUIZ_ANSWERS_MARK, Context, build_agent, describe_image, secret  # noqa: E402
 
@@ -258,25 +259,54 @@ def chat_page():
 
 
 # =================================================================== notes
-def delete_note(i: int):
-    notes_store.delete(i)
+def delete_note(note_id: str):
+    notes_store.delete(note_id)
+
+
+def request_reorganize():
+    ss.force_organize = True
 
 
 def notes_page():
-    title("Notes", "Short notes saved from your chats. They stay across chats and restarts.")
+    title("Notes", "Your notes are sorted into notebooks by topic, automatically.")
     with st.form("add_note", clear_on_submit=True):
-        text = st.text_input("Add a note yourself", placeholder="e.g. A checkpointer saves the agent's state per thread")
+        text = st.text_input("Add a note yourself", placeholder="e.g. LoRA fine-tunes a model by training small adapter matrices")
         if st.form_submit_button("Add note") and text.strip():
             notes_store.add(text.strip())
             st.rerun()
+
     notes = notes_store.load()
     if not notes:
         st.info("No notes yet. In the chat, say something like *save a note: middleware wraps the model call*.")
-    for i, note in enumerate(notes):
-        with st.container(border=True):
-            c1, c2 = st.columns([12, 1])
-            c1.markdown(note)
-            c2.button("🗑️", key=f"del_note_{i}", on_click=delete_note, args=(i,), help="Delete this note")
+        return
+
+    # The organizer agent runs whenever there are new, unsorted notes (or when you ask for a fresh start).
+    unsorted = tuple(n["id"] for n in notes if not n.get("topic"))
+    forced = ss.pop("force_organize", False)
+    if forced or (unsorted and ss.get("organize_tried") != unsorted):
+        ss.organize_tried = unsorted
+        done = False
+        try:
+            with st.spinner("Organizing your notes into notebooks..."):
+                run(organizer.organize_notes(fresh=forced))
+            done = True
+        except Exception as e:
+            st.warning(f"Couldn't organize the notes right now ({e}). They're shown unsorted for now.")
+        if done:
+            st.rerun()
+
+    st.button("🔄 Re-organize from scratch", on_click=request_reorganize, help="Let the organizer regroup all notes")
+
+    notebooks: dict[str, list[dict]] = {}
+    for n in notes:
+        notebooks.setdefault(n.get("topic") or "📥 Unsorted", []).append(n)
+    for topic, items in sorted(notebooks.items(), key=lambda kv: (kv[0].startswith("📥"), kv[0].lower())):
+        label = topic if topic.startswith("📥") else f"📓 {topic}"
+        with st.expander(f"{label}  ·  {len(items)}", expanded=True):
+            for n in items:
+                c1, c2 = st.columns([12, 1])
+                c1.markdown(f"- {n['text']}")
+                c2.button("🗑️", key=f"del_{n['id']}", on_click=delete_note, args=(n["id"],), help="Delete this note")
 
 
 # ============================================================== flashcards

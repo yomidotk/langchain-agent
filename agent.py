@@ -126,9 +126,9 @@ def save_note(note: str, runtime: ToolRuntime) -> Command:
 
 @tool
 def list_notes() -> str:
-    """List every note saved so far."""
+    """List every note saved so far, with the notebook (topic) each one belongs to."""
     notes = notes_store.load()
-    return "\n".join(f"{i + 1}. {n}" for i, n in enumerate(notes)) or "No notes yet."
+    return "\n".join(f"{i + 1}. [{n.get('topic') or 'unsorted'}] {n['text']}" for i, n in enumerate(notes)) or "No notes yet."
 
 
 class Card(BaseModel):
