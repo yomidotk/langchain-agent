@@ -51,6 +51,7 @@ run, agent = get_runtime()
 ss = st.session_state
 ss.setdefault("thread_id", str(uuid.uuid4()))
 ss.setdefault("messages", [])  # what we display: {"role", "content"}
+ss.setdefault("notes", [])  # persisted notes (agent state)
 ss.setdefault("pending", None)  # human-in-the-loop requests waiting for a decision
 ss.setdefault("study", None)  # current flashcard session
 ss.setdefault("_storage_loaded", False)  # whether we already loaded from browser localStorage
@@ -74,6 +75,8 @@ def _load_from_browser():
                     ss.messages = restored["messages"]
                 if restored.get("thread_id"):
                     ss.thread_id = restored["thread_id"]
+                if restored.get("notes") and not ss.notes:
+                    ss.notes = restored["notes"]
         except Exception:
             pass
         # Clear the query param so it doesn't stick in the URL
@@ -95,8 +98,8 @@ def _load_from_browser():
 
 
 def _save_to_browser():
-    """Write current messages + thread_id to browser localStorage (hidden 0-height iframe)."""
-    payload = _json.dumps({"messages": ss.messages, "thread_id": ss.thread_id})
+    """Write current messages + thread_id + notes to browser localStorage (hidden 0-height iframe)."""
+    payload = _json.dumps({"messages": ss.messages, "thread_id": ss.thread_id, "notes": ss.notes})
     # Escape for JS string literal
     escaped = payload.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
     components.html(
@@ -118,21 +121,37 @@ with st.sidebar:
     user_name = st.text_input("Your name", "Chiraz")
     level = st.selectbox("Your level", ["beginner", "intermediate", "advanced"], index=1)
     if st.button("New conversation"):
-        ss.thread_id, ss.messages, ss.pending = str(uuid.uuid4()), [], None
+        ss.thread_id, ss.messages, ss.pending, ss.notes = str(uuid.uuid4()), [], None, []
         _save_to_browser()  # clear localStorage too
         st.rerun()
 
 config = {"configurable": {"thread_id": ss.thread_id}}
 context = Context(user_name=user_name, level=level)  # runtime context
 
+# Sync notes between agent state and session_state / localStorage
+state = run(agent.aget_state(config))
+agent_notes = (state.values.get("notes") or []) if state and state.values else []
+if agent_notes:
+    ss.notes = agent_notes
+elif ss.notes:
+    # State in InMemorySaver was lost (e.g. on page refresh or restart), restore it into agent state
+    run(agent.aupdate_state(config, {"notes": ss.notes}))
+
 with st.sidebar:
     st.subheader("📝 Notes (agent state)")
-    state = run(agent.aget_state(config))
-    notes = state.values.get("notes", []) if state and state.values else []
-    for n in notes:
+    for n in ss.notes:
         st.markdown(f"- {n}")
-    if not notes:
+    if not ss.notes:
         st.caption("Ask me to save a note.")
+
+    with st.expander("➕ Add note manually", expanded=False):
+        new_note = st.text_input("Note", key="manual_note_input", label_visibility="collapsed", placeholder="Add note...")
+        if st.button("Save", key="btn_save_note"):
+            if new_note.strip():
+                ss.notes = list(ss.notes) + [new_note.strip()]
+                run(agent.aupdate_state(config, {"notes": ss.notes}))
+                _save_to_browser()
+                st.rerun()
 
 
 # =================================================================== chat
@@ -144,6 +163,10 @@ def call_agent(payload):
         ss.pending = interrupts[0].value["action_requests"]
     else:
         ss.messages.append({"role": "assistant", "content": result["messages"][-1].text})
+        # Check if the agent updated notes during tool execution
+        state = run(agent.aget_state(config))
+        if state and state.values and "notes" in state.values:
+            ss.notes = state.values.get("notes") or []
         _save_to_browser()
 
 
