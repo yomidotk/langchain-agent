@@ -135,7 +135,7 @@ with st.sidebar:
 
     st.divider()
     with st.expander("⚙️ Settings"):
-        st.text_input("Your name", "Chiraz", key="name")
+        st.text_input("Your name", "student", key="name")
         st.selectbox("Your level", ["beginner", "intermediate", "advanced"], index=1, key="level")
         if has_tts:
             st.selectbox("Voice", tts.VOICES, key="voice")
