@@ -1,4 +1,4 @@
-"""Streamlit UI for Study Buddy (chat + flip-card flashcards). Run with:  streamlit run app.py"""
+"""Streamlit UI for Focusly (chat + flip-card flashcards). Run with: streamlit run app.py"""
 
 import asyncio
 import html
@@ -17,7 +17,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
-st.set_page_config(page_title="Study Buddy", page_icon="📚")
+st.set_page_config(page_title="Focusly", page_icon="*", layout="wide", initial_sidebar_state="expanded")
 
 import cards_store  # noqa: E402
 import chat_index  # noqa: E402
@@ -53,6 +53,49 @@ def get_runtime():
 
 run, agent = get_runtime()
 
+def inject_theme() -> None:
+    """Apply the product UI without changing the app's interaction model."""
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap');
+        :root { --ink:#19221e; --muted:#637069; --paper:#f8faf7; --line:#e3e9e3; --pine:#1d5b43; --pine-deep:#154532; --mint:#dff4e9; --cream:#fffdf8; }
+        .stApp { background:var(--paper); color:var(--ink); font-family:'DM Sans',sans-serif; }
+        [data-testid="stHeader"] { background:rgba(248,250,247,.88); }
+        [data-testid="stSidebar"] { background:#f0f5f0; border-right:1px solid var(--line); }
+        [data-testid="stSidebar"] > div:first-child { padding:1.35rem 1rem; }
+        .block-container { max-width:1040px; padding-top:2.7rem; padding-bottom:3rem; }
+        h1,h2,h3 { color:var(--ink) !important; letter-spacing:-.035em; }
+        h1 { font-family:'Fraunces',Georgia,serif; font-size:clamp(2.1rem,4vw,3.2rem) !important; margin-bottom:.35rem !important; }
+        h2 { font-family:'Fraunces',Georgia,serif; }
+        .focusly-brand { display:flex; align-items:center; gap:.7rem; padding:.1rem .25rem 1.45rem; }
+        .focusly-mark { display:grid; place-items:center; width:2.15rem; height:2.15rem; border-radius:.72rem; background:var(--pine); color:#fff; font-weight:700; font-size:1.2rem; box-shadow:0 7px 18px rgba(29,91,67,.18); }
+        .focusly-brand strong { display:block; font-size:1.17rem; letter-spacing:-.04em; }
+        .focusly-brand span { display:block; color:var(--muted); font-size:.72rem; margin-top:.12rem; }
+        .page-kicker { color:var(--pine); font-size:.75rem; font-weight:700; text-transform:uppercase; letter-spacing:.12em; margin-bottom:.35rem; }
+        [data-testid="stChatMessage"] { background:var(--cream); border:1px solid var(--line); border-radius:1rem; padding:.85rem 1rem; margin-bottom:.8rem; box-shadow:0 2px 10px rgba(22,46,32,.025); }
+        [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) { background:var(--mint); border-color:#cae8d9; }
+        [data-testid="stChatInput"] { border:1px solid #cddbd1; border-radius:1rem; background:#fff; box-shadow:0 8px 24px rgba(25,34,30,.07); }
+        [data-testid="stChatInput"] textarea { font-family:'DM Sans',sans-serif; }
+        .stButton > button { border-radius:.7rem; border:1px solid #d3ddd5; background:#fff; color:var(--ink); font-weight:600; transition:all .18s ease; }
+        .stButton > button:hover { border-color:var(--pine); color:var(--pine); transform:translateY(-1px); }
+        .stButton > button[kind="primary"] { background:var(--pine); border-color:var(--pine); color:#fff; }
+        .stButton > button[kind="primary"]:hover { background:var(--pine-deep); color:#fff; }
+        div[data-baseweb="select"] > div,.stTextInput input { border-radius:.7rem !important; border-color:#d5ded6 !important; background:#fff !important; }
+        [data-testid="stRadio"] label { font-size:.92rem; }
+        [data-testid="stMetric"] { background:#fff; border:1px solid var(--line); border-radius:.9rem; padding:.85rem 1rem; }
+        [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:.9rem; overflow:hidden; }
+        [data-testid="stExpander"] { border:1px solid var(--line); border-radius:.85rem; background:#fff; }
+        .stAlert { border-radius:.8rem; }
+        @media (max-width:700px) { .block-container { padding:1.5rem 1rem 2rem; } }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+inject_theme()
+
 # ---------------------------------------------------------------- state
 ss = st.session_state
 ss.setdefault("study", None)  # current flashcard session
@@ -76,8 +119,8 @@ def open_chat(chat_id: str):
 
 # -------------------------------------------------------------- sidebar
 with st.sidebar:
-    st.header("📚 Study Buddy")
-    page = st.radio("Page", ["💬 Chat", "🃏 Flashcards"], label_visibility="collapsed")
+    st.markdown("<div class='focusly-brand'><div class='focusly-mark'>*</div><div><strong>Focusly</strong><span>Your personal study space</span></div></div>", unsafe_allow_html=True)
+    page = st.radio("Page", ["Chat", "Flashcards"], label_visibility="collapsed")
     user_name = st.text_input("Your name", "Chiraz")
     level = st.selectbox("Your level", ["beginner", "intermediate", "advanced"], index=1)
     language = st.selectbox("Answer language", list(LANGUAGES))
@@ -87,12 +130,12 @@ with st.sidebar:
         st.subheader("🔊 Voice")
         voice = st.selectbox("Voice", tts.VOICES)
         style = st.selectbox("Speaking style", list(tts.STYLES))
-    st.button("➕ New conversation", on_click=new_conversation)
+    st.button("+ New conversation", on_click=new_conversation, type="primary", use_container_width=True)
     past = chat_index.recent()
     if past:
         st.caption("Your chats")
         for cid, title in past:
-            st.button(f"💬 {title}", key=f"chat_{cid}", on_click=open_chat, args=(cid,), disabled=cid == thread_id)
+            st.button(title, key=f"chat_{cid}", on_click=open_chat, args=(cid,), disabled=cid == thread_id, use_container_width=True)
 
 context = Context(user_name=user_name, level=level, language=language)  # runtime context
 state = run(agent.aget_state(config))  # everything saved for this chat: messages + notes
@@ -153,7 +196,9 @@ def call_agent(payload):
 
 
 def chat_page():
-    st.title("💬 Chat")
+    st.markdown("<div class='page-kicker'>Your learning companion</div>", unsafe_allow_html=True)
+    st.title("What are we exploring?")
+    st.caption("Ask a question, share a topic, or attach an image to learn from.")
     for i, (role, text) in enumerate(history(values.get("messages", []))):
         with st.chat_message(role):
             st.markdown(text)
@@ -343,7 +388,9 @@ def study_view(decks: dict) -> None:
 
 
 def flashcards_page():
-    st.title("🃏 Flashcards")
+    st.markdown("<div class='page-kicker'>Practice with purpose</div>", unsafe_allow_html=True)
+    st.title("Flashcards")
+    st.caption("Review your decks, track progress, and strengthen recall.")
     decks = cards_store.load()
     if not decks:
         st.info("No flashcards yet. Go to the Chat page and ask: *make me flashcards about short-term memory*.")
@@ -355,7 +402,7 @@ def flashcards_page():
         overview(decks)
 
 
-if page == "💬 Chat":
+if page == "Chat":
     chat_page()
 else:
     flashcards_page()

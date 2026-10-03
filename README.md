@@ -1,6 +1,6 @@
-# AI Marketing Agent
+# Focusly
 
-A Streamlit app that reads a public GitHub repository, uses a DigitalOcean model to create marketing copy, generates voiceovers with Edge TTS, and creates social images through Alibaba Qwen Image.
+A personal study companion built with Streamlit. Focusly supports contextual AI chat, image questions, saved notes, optional voice playback, and self-paced flashcard practice.
 
 ## Run locally
 
