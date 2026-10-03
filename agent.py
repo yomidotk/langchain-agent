@@ -114,7 +114,7 @@ def get_profile(runtime: ToolRuntime[Context]) -> str:
 @tool
 def save_note(note: str, runtime: ToolRuntime) -> Command:
     """Save a short study note so it can be recalled later in the conversation."""
-    notes = (runtime.state.get("notes") or []) if runtime.state else []
+    notes = runtime.state.get("notes", [])
     return Command(
         update={
             "notes": notes + [note],
@@ -128,7 +128,7 @@ def save_note(note: str, runtime: ToolRuntime) -> Command:
 @tool
 def list_notes(runtime: ToolRuntime) -> str:
     """List every note saved so far."""
-    notes = (runtime.state.get("notes") or []) if runtime.state else []
+    notes = runtime.state.get("notes", [])
     return "\n".join(f"{i + 1}. {n}" for i, n in enumerate(notes)) or "No notes yet."
 
 
@@ -182,8 +182,7 @@ def personalize(request: ModelRequest) -> str:
     return (
         "You are Study Buddy, a friendly AI tutor.\n"
         f"The student is {ctx.user_name}, level: {ctx.level}. Adapt your explanations to that level.\n"
-        "Use tools when they help: call save_note when asked to save a note or for important takeaways to remember, "
-        "list_notes to recall saved notes, make_quiz for quizzes, "
+        "Use tools when they help: notes for things worth remembering, make_quiz for quizzes, "
         "create_flashcards when asked for flashcards (the student studies them on the Flashcards page). "
         "Never send an email without being asked."
     )

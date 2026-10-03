@@ -4,5 +4,7 @@ langgraph>=1.0
 langchain-openai
 langchain-mcp-adapters
 mcp
+langgraph-checkpoint-sqlite
+aiosqlite
 python-dotenv
 langgraph-cli[inmem]

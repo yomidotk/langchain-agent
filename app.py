@@ -1,26 +1,25 @@
 """Streamlit UI for Study Buddy (chat + flip-card flashcards). Run with:  streamlit run app.py"""
-# Browser localStorage is used to persist chat messages across page refreshes.
 
 import asyncio
 import html
-import json as _json
 import random
+import re
 import sys
 import tempfile
 import threading
 import uuid
 from pathlib import Path
 
+import aiosqlite
 import streamlit as st
 import streamlit.components.v1 as components
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
 st.set_page_config(page_title="Study Buddy", page_icon="📚")
 
 import cards_store  # noqa: E402
-import session_store  # noqa: E402
 from agent import HERE, Context, build_agent, describe_image, secret  # noqa: E402
 
 if not secret("DO_API_KEY"):
@@ -38,42 +37,32 @@ def get_runtime():
     def run(coro):
         return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
+    async def make_saver():  # short-term memory saved in a SQLite file, so it survives refreshes and restarts
+        return AsyncSqliteSaver(await aiosqlite.connect(str(HERE / "study_buddy.db")))
+
     client = MultiServerMCPClient(
         {"study_tools": {"command": sys.executable, "args": [str(HERE / "mcp_server.py")], "transport": "stdio"}}
     )
     mcp_tools = run(client.get_tools())  # MCP
-    agent = build_agent(mcp_tools, InMemorySaver())  # short-term memory
+    agent = build_agent(mcp_tools, run(make_saver()))
     return run, agent
 
 
 run, agent = get_runtime()
 
-# ---------------------------------------------------------------- session & state
-# Keep thread_id in query params so page refresh (F5) stays in the exact same session
-qp = st.query_params
-thread_id = qp.get("session")
-if not thread_id:
-    thread_id = str(uuid.uuid4())
-    qp["session"] = thread_id
-
+# ---------------------------------------------------------------- state
 ss = st.session_state
-ss.setdefault("thread_id", thread_id)
-if ss.thread_id != thread_id:
-    ss.thread_id = thread_id
-
-# Load saved session data (messages + notes) from session_store
-saved = session_store.get_session(ss.thread_id)
-if "messages" not in ss:
-    ss.messages = list(saved.get("messages", []))
-if "notes" not in ss:
-    ss.notes = list(saved.get("notes", []))
-ss.setdefault("pending", None)  # human-in-the-loop requests waiting for a decision
 ss.setdefault("study", None)  # current flashcard session
 
+# The conversation id lives in the URL (?chat=...), so a browser refresh brings the same chat back.
+if "chat" not in st.query_params:
+    st.query_params["chat"] = uuid.uuid4().hex
+thread_id = st.query_params["chat"]
+config = {"configurable": {"thread_id": thread_id}}
 
-def _sync_session():
-    """Save current chat messages and notes to session_store."""
-    session_store.save_session(ss.thread_id, ss.messages, ss.notes)
+
+def new_conversation():
+    st.query_params["chat"] = uuid.uuid4().hex
 
 
 # -------------------------------------------------------------- sidebar
@@ -82,72 +71,57 @@ with st.sidebar:
     page = st.radio("Page", ["💬 Chat", "🃏 Flashcards"], label_visibility="collapsed")
     user_name = st.text_input("Your name", "Chiraz")
     level = st.selectbox("Your level", ["beginner", "intermediate", "advanced"], index=1)
-    if st.button("New conversation"):
-        new_id = str(uuid.uuid4())
-        ss.thread_id = new_id
-        ss.messages = []
-        ss.notes = []
-        ss.pending = None
-        st.query_params["session"] = new_id
-        session_store.save_session(new_id, [], [])
-        st.rerun()
+    st.button("New conversation", on_click=new_conversation)
 
-config = {"configurable": {"thread_id": ss.thread_id}}
 context = Context(user_name=user_name, level=level)  # runtime context
-
-# Sync notes between agent state and session_store
-state = run(agent.aget_state(config))
-agent_notes = (state.values.get("notes") or []) if state and state.values else []
-if agent_notes:
-    ss.notes = agent_notes
-    _sync_session()
-elif ss.notes:
-    # State in InMemorySaver was lost (e.g. on page refresh or restart), restore it into agent state
-    run(agent.aupdate_state(config, {"notes": ss.notes}))
+state = run(agent.aget_state(config))  # everything saved for this chat: messages + notes
+values = state.values if state and state.values else {}
 
 with st.sidebar:
     st.subheader("📝 Notes (agent state)")
-    for n in ss.notes:
+    for n in values.get("notes", []):
         st.markdown(f"- {n}")
-    if not ss.notes:
+    if not values.get("notes"):
         st.caption("Ask me to save a note.")
-
-    with st.expander("➕ Add note manually", expanded=False):
-        new_note = st.text_input("Note", key="manual_note_input", label_visibility="collapsed", placeholder="Add note...")
-        if st.button("Save", key="btn_save_note"):
-            if new_note.strip():
-                ss.notes = list(ss.notes) + [new_note.strip()]
-                run(agent.aupdate_state(config, {"notes": ss.notes}))
-                _sync_session()
-                st.rerun()
 
 
 # =================================================================== chat
+IMAGE_TAIL = re.compile(r"\n\n\[Attached image, described by a vision model:.*\]\s*$", re.DOTALL)
+
+
+def history(messages):
+    """Turn the saved agent messages into chat bubbles (skip tool calls and summaries)."""
+    out = []
+    for m in messages:
+        if m.additional_kwargs.get("lc_source") == "summarization":
+            continue
+        if m.type == "human":
+            out.append(("user", IMAGE_TAIL.sub("\n\n🖼️ *image attached*", m.text)))
+        elif m.type == "ai" and m.text.strip():
+            out.append(("assistant", m.text))
+    return out
+
+
 def call_agent(payload):
     with st.spinner("Thinking..."):
-        result = run(agent.ainvoke(payload, config=config, context=context))
-    interrupts = result.get("__interrupt__")
-    if interrupts:  # the agent paused: needs a human decision
-        ss.pending = interrupts[0].value["action_requests"]
-    else:
-        ss.messages.append({"role": "assistant", "content": result["messages"][-1].text})
-        # Check if the agent updated notes during tool execution
-        state = run(agent.aget_state(config))
-        if state and state.values and "notes" in state.values:
-            ss.notes = state.values.get("notes") or []
-        _sync_session()
+        run(agent.ainvoke(payload, config=config, context=context))
 
 
 def chat_page():
     st.title("💬 Chat")
-    for m in ss.messages:
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
+    for role, text in history(values.get("messages", [])):
+        with st.chat_message(role):
+            st.markdown(text)
 
-    if ss.pending:
+    pending = None  # the agent paused and needs a human decision
+    for it in getattr(state, "interrupts", ()) or ():
+        pending = it.value["action_requests"]
+        break
+
+    if pending:
         with st.chat_message("assistant"):
             st.warning("I need your approval before doing this:")
-            for r in ss.pending:
+            for r in pending:
                 st.code(f"{r['name']}({r['args']})", language="python")
             col1, col2 = st.columns(2)
             decision = None
@@ -156,22 +130,21 @@ def chat_page():
             if col2.button("❌ Reject"):
                 decision = {"type": "reject", "message": "User said no."}
         if decision:
-            decisions = [decision] * len(ss.pending)
-            ss.pending = None
-            call_agent(Command(resume={"decisions": decisions}))
+            call_agent(Command(resume={"decisions": [decision] * len(pending)}))
             st.rerun()
 
     prompt = st.chat_input(
         "Ask me anything, or attach an image...",
         accept_file=True,
         file_type=["png", "jpg", "jpeg"],
-        disabled=bool(ss.pending),
+        disabled=bool(pending),
     )
 
     if prompt:
         text = prompt.text or "Describe this image."
-        shown = text
         to_agent = text
+        with st.chat_message("user"):
+            st.markdown(text)
         if prompt.files:  # multimodal: a vision model describes the image, the agent gets the description
             f = prompt.files[0]
             with tempfile.NamedTemporaryFile(delete=False, suffix=Path(f.name).suffix) as tmp:
@@ -179,9 +152,6 @@ def chat_page():
             with st.spinner("Looking at the image..."):
                 description = run(describe_image(tmp.name, text))
             to_agent = f"{text}\n\n[Attached image, described by a vision model: {description}]"
-            shown = f"{text}\n\n🖼️ *{f.name} attached*"
-        ss.messages.append({"role": "user", "content": shown})
-        _sync_session()
         call_agent({"messages": [{"role": "user", "content": to_agent}]})
         st.rerun()
 
