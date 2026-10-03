@@ -54,40 +54,64 @@ def get_runtime():
 run, agent = get_runtime()
 
 def inject_theme() -> None:
-    """Apply the product UI without changing the app's interaction model."""
+    """Apply the Focusly product interface without changing app behavior."""
     st.markdown(
         """
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap');
-        :root { --ink:#19221e; --muted:#637069; --paper:#f8faf7; --line:#e3e9e3; --pine:#1d5b43; --pine-deep:#154532; --mint:#dff4e9; --cream:#fffdf8; }
-        .stApp { background:var(--paper); color:var(--ink); font-family:'DM Sans',sans-serif; }
-        [data-testid="stHeader"] { background:rgba(248,250,247,.88); }
-        [data-testid="stSidebar"] { background:#f0f5f0; border-right:1px solid var(--line); }
-        [data-testid="stSidebar"] > div:first-child { padding:1.35rem 1rem; }
-        .block-container { max-width:1040px; padding-top:2.7rem; padding-bottom:3rem; }
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap');
+        :root { --navy:#101828; --navy-2:#18243a; --ink:#172033; --muted:#697386; --canvas:#f5f7fb; --card:#ffffff; --line:#e5e9f0; --blue:#4f46e5; --violet:#7c3aed; --blue-pale:#eef2ff; --success:#16803c; }
+        .stApp { background:var(--canvas); color:var(--ink); font-family:'DM Sans',sans-serif; }
+        [data-testid="stHeader"] { background:rgba(245,247,251,.86); border-bottom:1px solid rgba(229,233,240,.7); }
+        [data-testid="stSidebar"] { background:var(--navy); border:0; }
+        [data-testid="stSidebar"] > div:first-child { padding:1.25rem .95rem 1.6rem; }
+        [data-testid="stSidebar"] * { color:#e8edf8; }
+        [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p { color:#97a5c1 !important; }
+        [data-testid="stSidebar"] .stTextInput label, [data-testid="stSidebar"] .stSelectbox label { color:#aebad0 !important; font-size:.73rem; font-weight:700; text-transform:uppercase; letter-spacing:.08em; }
+        [data-testid="stSidebar"] div[data-baseweb="select"] > div, [data-testid="stSidebar"] .stTextInput input { background:var(--navy-2) !important; border-color:#30415f !important; color:#fff !important; }
+        [data-testid="stSidebar"] .stButton > button { background:transparent; border-color:transparent; color:#cdd7eb; text-align:left; padding:.58rem .65rem; }
+        [data-testid="stSidebar"] .stButton > button:hover { background:#223252; border-color:#304566; color:#fff; transform:none; }
+        [data-testid="stSidebar"] .stButton > button[kind="primary"] { background:linear-gradient(110deg,var(--blue),var(--violet)); border:0; color:#fff; text-align:center; padding:.68rem .7rem; box-shadow:0 10px 24px rgba(79,70,229,.28); }
+        [data-testid="stSidebar"] [data-testid="stRadio"] { gap:.35rem; }
+        [data-testid="stSidebar"] [data-testid="stRadio"] label { width:100%; padding:.62rem .65rem; border-radius:.6rem; transition:.15s ease; }
+        [data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) { background:#263858; color:#fff; font-weight:700; }
+        [data-testid="stSidebar"] [data-testid="stRadio"] input { accent-color:#818cf8; }
+        .block-container { max-width:1180px; padding:2.2rem 2.6rem 3rem; }
         h1,h2,h3 { color:var(--ink) !important; letter-spacing:-.035em; }
-        h1 { font-family:'Fraunces',Georgia,serif; font-size:clamp(2.1rem,4vw,3.2rem) !important; margin-bottom:.35rem !important; }
-        h2 { font-family:'Fraunces',Georgia,serif; }
-        .focusly-brand { display:flex; align-items:center; gap:.7rem; padding:.1rem .25rem 1.45rem; }
-        .focusly-mark { display:grid; place-items:center; width:2.15rem; height:2.15rem; border-radius:.72rem; background:var(--pine); color:#fff; font-weight:700; font-size:1.2rem; box-shadow:0 7px 18px rgba(29,91,67,.18); }
-        .focusly-brand strong { display:block; font-size:1.17rem; letter-spacing:-.04em; }
-        .focusly-brand span { display:block; color:var(--muted); font-size:.72rem; margin-top:.12rem; }
-        .page-kicker { color:var(--pine); font-size:.75rem; font-weight:700; text-transform:uppercase; letter-spacing:.12em; margin-bottom:.35rem; }
-        [data-testid="stChatMessage"] { background:var(--cream); border:1px solid var(--line); border-radius:1rem; padding:.85rem 1rem; margin-bottom:.8rem; box-shadow:0 2px 10px rgba(22,46,32,.025); }
-        [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) { background:var(--mint); border-color:#cae8d9; }
-        [data-testid="stChatInput"] { border:1px solid #cddbd1; border-radius:1rem; background:#fff; box-shadow:0 8px 24px rgba(25,34,30,.07); }
+        h1 { font-family:'Playfair Display',Georgia,serif; font-size:clamp(2.1rem,4vw,3.25rem) !important; line-height:1.08; margin:0 !important; }
+        h2 { font-size:1.32rem !important; margin-top:1.8rem; }
+        .focusly-brand { display:flex; align-items:center; gap:.72rem; padding:.15rem .3rem 1.7rem; }
+        .focusly-mark { display:grid; place-items:center; width:2.25rem; height:2.25rem; border-radius:.72rem; background:linear-gradient(140deg,#8b5cf6,#4f46e5); color:#fff; font-weight:700; font-size:1.1rem; box-shadow:0 8px 20px rgba(79,70,229,.35); }
+        .focusly-brand strong { display:block; color:#fff; font-size:1.2rem; letter-spacing:-.04em; }
+        .focusly-brand span { display:block; color:#9eacc8; font-size:.7rem; margin-top:.1rem; }
+        .sidebar-section { color:#8d9bb7; font-size:.68rem; font-weight:700; text-transform:uppercase; letter-spacing:.13em; padding:.9rem .55rem .35rem; }
+        .workspace-top { display:flex; justify-content:space-between; align-items:center; gap:1rem; margin-bottom:1.8rem; }
+        .workspace-label { display:flex; align-items:center; gap:.55rem; color:var(--muted); font-size:.84rem; font-weight:600; }
+        .status-dot { width:.48rem; height:.48rem; border-radius:50%; background:#20b15a; box-shadow:0 0 0 4px #e2f7e9; }
+        .hero { position:relative; overflow:hidden; padding:2.25rem 2.4rem; border-radius:1.35rem; color:#fff; background:linear-gradient(118deg,#18254a 0%,#263c73 55%,#594bb7 100%); box-shadow:0 18px 44px rgba(30,46,89,.18); margin-bottom:1.5rem; }
+        .hero:after { content:''; position:absolute; width:20rem; height:20rem; border:1px solid rgba(255,255,255,.13); border-radius:50%; right:-6rem; top:-10rem; box-shadow:-4rem 5rem 0 -1px rgba(255,255,255,.06), -8rem 9rem 0 -1px rgba(255,255,255,.05); }
+        .hero > * { position:relative; z-index:1; }
+        .hero-kicker { font-size:.73rem; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:#bfc9ff; margin-bottom:.6rem; }
+        .hero h1 { color:#fff !important; max-width:40rem; }
+        .hero p { color:#d6def5; max-width:36rem; margin:.8rem 0 0; font-size:1rem; line-height:1.55; }
+        .starter-heading { font-size:.78rem; font-weight:700; letter-spacing:.11em; text-transform:uppercase; color:var(--muted); margin:1.6rem 0 .65rem; }
+        .stButton > button { min-height:2.55rem; border-radius:.7rem; border:1px solid #d9dfeb; background:var(--card); color:var(--ink); font-weight:650; transition:all .16s ease; }
+        .stButton > button:hover { border-color:var(--blue); color:var(--blue); transform:translateY(-1px); box-shadow:0 7px 17px rgba(68,76,111,.1); }
+        .starter-card .stButton > button { height:6.3rem; white-space:normal; text-align:left; padding:1rem; align-items:flex-start; background:#fff; }
+        .stButton > button[kind="primary"] { background:linear-gradient(110deg,var(--blue),var(--violet)); border:0; color:#fff; }
+        .stButton > button[kind="primary"]:hover { color:#fff; box-shadow:0 10px 22px rgba(79,70,229,.25); }
+        [data-testid="stChatMessage"] { background:#fff; border:1px solid var(--line); border-radius:1rem; padding:1rem 1.05rem; margin-bottom:.85rem; box-shadow:0 3px 14px rgba(23,32,51,.035); }
+        [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) { background:var(--blue-pale); border-color:#dce3ff; }
+        [data-testid="stChatInput"] { border:1px solid #d7deec; border-radius:1rem; background:#fff; box-shadow:0 10px 26px rgba(27,42,75,.08); }
         [data-testid="stChatInput"] textarea { font-family:'DM Sans',sans-serif; }
-        .stButton > button { border-radius:.7rem; border:1px solid #d3ddd5; background:#fff; color:var(--ink); font-weight:600; transition:all .18s ease; }
-        .stButton > button:hover { border-color:var(--pine); color:var(--pine); transform:translateY(-1px); }
-        .stButton > button[kind="primary"] { background:var(--pine); border-color:var(--pine); color:#fff; }
-        .stButton > button[kind="primary"]:hover { background:var(--pine-deep); color:#fff; }
-        div[data-baseweb="select"] > div,.stTextInput input { border-radius:.7rem !important; border-color:#d5ded6 !important; background:#fff !important; }
-        [data-testid="stRadio"] label { font-size:.92rem; }
-        [data-testid="stMetric"] { background:#fff; border:1px solid var(--line); border-radius:.9rem; padding:.85rem 1rem; }
-        [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:.9rem; overflow:hidden; }
-        [data-testid="stExpander"] { border:1px solid var(--line); border-radius:.85rem; background:#fff; }
-        .stAlert { border-radius:.8rem; }
-        @media (max-width:700px) { .block-container { padding:1.5rem 1rem 2rem; } }
+        div[data-baseweb="select"] > div,.stTextInput input { border-radius:.65rem !important; border-color:#d9dfeb !important; background:#fff !important; }
+        [data-testid="stMetric"] { background:#fff; border:1px solid var(--line); border-radius:1rem; padding:1rem 1.1rem; }
+        [data-testid="stDataFrame"] { border:1px solid var(--line); border-radius:1rem; overflow:hidden; background:#fff; }
+        [data-testid="stExpander"] { border:1px solid var(--line); border-radius:.9rem; background:#fff; }
+        .deck-toolbar { background:#fff; border:1px solid var(--line); border-radius:1rem; padding:1.25rem; margin:1rem 0 1.25rem; }
+        .deck-toolbar h3 { margin:0 0 .25rem; font-size:1.1rem; }
+        .deck-toolbar p { color:var(--muted); margin:0; font-size:.9rem; }
+        .stAlert { border-radius:.85rem; }
+        @media (max-width:700px) { .block-container { padding:1.35rem 1rem 2.25rem; } .hero { padding:1.65rem; } .workspace-top { margin-bottom:1.25rem; } }
         </style>
         """,
         unsafe_allow_html=True,
@@ -119,8 +143,10 @@ def open_chat(chat_id: str):
 
 # -------------------------------------------------------------- sidebar
 with st.sidebar:
-    st.markdown("<div class='focusly-brand'><div class='focusly-mark'>*</div><div><strong>Focusly</strong><span>Your personal study space</span></div></div>", unsafe_allow_html=True)
+    st.markdown("<div class='focusly-brand'><div class='focusly-mark'>F</div><div><strong>Focusly</strong><span>Learn with clarity</span></div></div>", unsafe_allow_html=True)
+    st.markdown("<div class='sidebar-section'>Workspace</div>", unsafe_allow_html=True)
     page = st.radio("Page", ["Chat", "Flashcards"], label_visibility="collapsed")
+    st.markdown("<div class='sidebar-section'>Study profile</div>", unsafe_allow_html=True)
     user_name = st.text_input("Your name", "Chiraz")
     level = st.selectbox("Your level", ["beginner", "intermediate", "advanced"], index=1)
     language = st.selectbox("Answer language", list(LANGUAGES))
@@ -130,7 +156,8 @@ with st.sidebar:
         st.subheader("🔊 Voice")
         voice = st.selectbox("Voice", tts.VOICES)
         style = st.selectbox("Speaking style", list(tts.STYLES))
-    st.button("+ New conversation", on_click=new_conversation, type="primary", use_container_width=True)
+    st.markdown("<div class='sidebar-section'>Conversations</div>", unsafe_allow_html=True)
+    st.button("New conversation", on_click=new_conversation, type="primary", use_container_width=True)
     past = chat_index.recent()
     if past:
         st.caption("Your chats")
@@ -196,10 +223,31 @@ def call_agent(payload):
 
 
 def chat_page():
-    st.markdown("<div class='page-kicker'>Your learning companion</div>", unsafe_allow_html=True)
-    st.title("What are we exploring?")
-    st.caption("Ask a question, share a topic, or attach an image to learn from.")
-    for i, (role, text) in enumerate(history(values.get("messages", []))):
+    messages = history(values.get("messages", []))
+    st.markdown("<div class='workspace-top'><div class='workspace-label'><span class='status-dot'></span> Focus session active</div><div class='workspace-label'>AI study workspace</div></div>", unsafe_allow_html=True)
+    quick_prompt = None
+    if not messages:
+        safe_name = html.escape(user_name or "there")
+        st.markdown(f"<section class='hero'><div class='hero-kicker'>Your learning space</div><h1>Make your next study session count, {safe_name}.</h1><p>Ask for a clear explanation, turn a topic into flashcards, or bring in an image you want to understand.</p></section>", unsafe_allow_html=True)
+        st.markdown("<div class='starter-heading'>Start with a guided prompt</div>", unsafe_allow_html=True)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("<div class='starter-card'>", unsafe_allow_html=True)
+            if st.button("Explain a difficult topic simply", key="starter_explain", use_container_width=True):
+                quick_prompt = "Explain a difficult topic to me in simple terms."
+            st.markdown("</div>", unsafe_allow_html=True)
+        with c2:
+            st.markdown("<div class='starter-card'>", unsafe_allow_html=True)
+            if st.button("Create a focused revision plan", key="starter_plan", use_container_width=True):
+                quick_prompt = "Create a focused revision plan for me."
+            st.markdown("</div>", unsafe_allow_html=True)
+        with c3:
+            st.markdown("<div class='starter-card'>", unsafe_allow_html=True)
+            if st.button("Turn a topic into flashcards", key="starter_cards", use_container_width=True):
+                quick_prompt = "Make me flashcards for a topic I am studying."
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    for i, (role, text) in enumerate(messages):
         with st.chat_message(role):
             st.markdown(text)
             if role == "assistant" and has_tts:
@@ -232,13 +280,13 @@ def chat_page():
         disabled=bool(pending),
     )
 
-    if prompt:
-        text = prompt.text or "Describe this image."
+    if prompt or quick_prompt:
+        text = quick_prompt or prompt.text or "Describe this image."
         to_agent = text
         chat_index.touch(thread_id, title=text)  # registers the chat in your list on its first message
         with st.chat_message("user"):
             st.markdown(text)
-        if prompt.files:  # multimodal: a vision model describes the image, the agent gets the description
+        if prompt and prompt.files:  # multimodal: a vision model describes the image, the agent gets the description
             f = prompt.files[0]
             with tempfile.NamedTemporaryFile(delete=False, suffix=Path(f.name).suffix) as tmp:
                 tmp.write(f.getvalue())
@@ -327,7 +375,14 @@ def overview(decks: dict) -> None:
                 "Accuracy": f"{right / tries:.0%}" if tries else "-",
             }
         )
-    st.dataframe(rows, hide_index=True)
+    total_cards = sum(len(cards) for cards in decks.values())
+    reviewed = sum(sum(card["last"] is not None for card in cards) for cards in decks.values())
+    one, two, three = st.columns(3)
+    one.metric("Study decks", len(decks))
+    two.metric("Cards saved", total_cards)
+    three.metric("Cards reviewed", reviewed)
+    st.markdown("<div class='deck-toolbar'><h3>Choose your next review</h3><p>Pick a deck and set the practice mode that works for this session.</p></div>", unsafe_allow_html=True)
+    st.dataframe(rows, hide_index=True, use_container_width=True)
 
     concept = st.selectbox("Pick a concept to study", list(decks))
     cards = decks[concept]
@@ -388,9 +443,8 @@ def study_view(decks: dict) -> None:
 
 
 def flashcards_page():
-    st.markdown("<div class='page-kicker'>Practice with purpose</div>", unsafe_allow_html=True)
-    st.title("Flashcards")
-    st.caption("Review your decks, track progress, and strengthen recall.")
+    st.markdown("<div class='workspace-top'><div class='workspace-label'><span class='status-dot'></span> Recall practice</div><div class='workspace-label'>Your study library</div></div>", unsafe_allow_html=True)
+    st.markdown("<section class='hero'><div class='hero-kicker'>Flashcard library</div><h1>Build knowledge that sticks.</h1><p>Use short, focused practice sessions and revisit the cards that need another pass.</p></section>", unsafe_allow_html=True)
     decks = cards_store.load()
     if not decks:
         st.info("No flashcards yet. Go to the Chat page and ask: *make me flashcards about short-term memory*.")
