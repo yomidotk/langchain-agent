@@ -2,8 +2,6 @@ streamlit>=1.43
 langchain>=1.0
 langgraph>=1.0
 langchain-openai
-langchain-mcp-adapters
-mcp
 langgraph-checkpoint-sqlite
 aiosqlite
 httpx

@@ -1,20 +1,17 @@
-"""Study Buddy: one LangChain agent that uses everything from the course (except RAG, for now).
+"""Study Buddy: LangChain agent for interactive learning.
 
-Course topic            -> where it shows up below
----------------------------------------------------------------
-Create Agent            -> create_agent(...) in build_agent()
-Foundational Models     -> do_model() / alibaba_model() + FAST / SMART / VISION
-Tools                   -> get_time, save_note, create_flashcards, send_email, ...
-Short-Term Memory       -> checkpointer + thread_id
-Multimodal Messages     -> image_message() + Alibaba vision model
-MCP                     -> MultiServerMCPClient + mcp_server.py
-Context and State       -> Context (runtime context) + StudyState (custom state)
-Multi-Agent Systems     -> quiz-maker sub-agent wrapped as a tool
-Middleware              -> personalize / ModelRouter / Summarization / HITL
-Managing Long Convos    -> SummarizationMiddleware
-Human-in-the-Loop       -> HumanInTheLoopMiddleware on send_email
-Dynamic Agents          -> dynamic prompt (name, level) + ModelRouter (dynamic model)
-Agent Chat UI           -> graph.py + langgraph.json
+Features:
+- Create Agent: create_agent(...) in build_agent()
+- Foundational Models: do_model() / alibaba_model() + FAST / SMART / VISION
+- Tools: get_time, get_profile, save_note, list_notes, create_flashcards, make_quiz
+- Short-Term Memory: checkpointer + thread_id
+- Multimodal Messages: image_message() + Alibaba vision model
+- Context and State: Context (runtime context) + StudyState (custom state)
+- Multi-Agent Systems: quiz-maker sub-agent wrapped as a tool
+- Middleware: personalize / ModelRouter / Summarization
+- Managing Long Convos: SummarizationMiddleware
+- Dynamic Agents: dynamic prompt (name, level) + ModelRouter (dynamic model)
+- Agent Chat UI: graph.py + langgraph.json
 """
 
 import asyncio
@@ -30,14 +27,12 @@ from dotenv import load_dotenv
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
-    HumanInTheLoopMiddleware,
     ModelRequest,
     SummarizationMiddleware,
     dynamic_prompt,
 )
 from langchain.messages import HumanMessage, ToolMessage
 from langchain.tools import ToolRuntime, tool
-from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
@@ -149,14 +144,6 @@ def create_flashcards(concept: str, cards: list[Card], runtime: ToolRuntime[Cont
     return f"Created {n} flashcards for '{concept}'. Tell the student to open the Flashcards page to study them."
 
 
-@tool
-def send_email(to: str, subject: str, body: str) -> str:
-    """Send an email. (Fake sender for the demo: it only prints.)
-    A human must approve this before it runs (see HumanInTheLoopMiddleware)."""
-    print(f"\n[EMAIL SENT] to={to} | subject={subject}\n{body}\n")
-    return f"Email sent to {to}."
-
-
 # ------------------------------------------------------- Multi-agent
 QUIZ_ANSWERS_MARK = "---ANSWERS---"  # the app shows everything after this line behind a "Show the answers" button
 
@@ -191,8 +178,7 @@ def build_system_prompt(ctx: Context) -> str:
         "Use tools when they help: save_note for things worth remembering, "
         "create_flashcards when asked for flashcards (the student studies them on the Flashcards page). "
         "To give a quiz you MUST call make_quiz; never invent a quiz yourself. The quiz appears in the chat "
-        "automatically, so after calling it reply with one short sentence and do not repeat the questions. "
-        "Never send an email without being asked.\n"
+        "automatically, so after calling it reply with one short sentence and do not repeat the questions.\n"
         "Always reply in English, even if the student writes in another language."
     )
 
@@ -218,7 +204,7 @@ class ModelRouter(AgentMiddleware):
 
 # -------------------------------------------------------------- Agent
 def build_agent(extra_tools=(), checkpointer=None):
-    tools = [get_time, get_profile, save_note, list_notes, create_flashcards, send_email, build_quiz_tool(), *extra_tools]
+    tools = [get_time, get_profile, save_note, list_notes, create_flashcards, build_quiz_tool(), *extra_tools]
 
     return create_agent(
         model=FAST,
@@ -230,7 +216,6 @@ def build_agent(extra_tools=(), checkpointer=None):
             personalize,
             ModelRouter(),
             SummarizationMiddleware(model=FAST, trigger=("tokens", 4000), keep=("messages", 10)),
-            HumanInTheLoopMiddleware(interrupt_on={"send_email": True}),
         ],
     )
 
@@ -277,15 +262,9 @@ async def describe_image_bytes(raw: bytes, mime: str, question: str) -> str:
 
 # ----------------------------------------------------------- CLI chat
 async def main():
-    # MCP: connect to the local server and load its tools
-    client = MultiServerMCPClient(
-        {"study_tools": {"command": sys.executable, "args": [str(HERE / "mcp_server.py")], "transport": "stdio"}}
-    )
-    mcp_tools = await client.get_tools()
-
-    agent = build_agent(mcp_tools, InMemorySaver())  # short-term memory
+    agent = build_agent(checkpointer=InMemorySaver())  # short-term memory
     config = {"configurable": {"thread_id": "session-1"}}
-    context = Context(user_name="Chiraz", level="intermediate")
+    context = Context(user_name="Student", level="intermediate")
 
     print("Study Buddy ready. Type a message, '/image path.png question' for a picture, or 'quit'.")
     while True:
@@ -298,17 +277,6 @@ async def main():
             continue
 
         result = await agent.ainvoke({"messages": [{"role": "user", "content": text}]}, config=config, context=context)
-
-        # Human-in-the-loop: the run pauses until we approve or reject
-        while result.get("__interrupt__"):
-            requests = result["__interrupt__"][0].value["action_requests"]
-            decisions = []
-            for r in requests:
-                print(f"\nApproval needed: {r['name']}({r['args']})")
-                ok = input("approve? [y/n] ").strip().lower() == "y"
-                decisions.append({"type": "approve"} if ok else {"type": "reject", "message": "User said no."})
-            result = await agent.ainvoke(Command(resume={"decisions": decisions}), config=config, context=context)
-
         print(f"\nbuddy> {result['messages'][-1].text}")
 
 

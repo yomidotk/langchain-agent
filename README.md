@@ -1,23 +1,23 @@
 ﻿# 🦕 Studeno — AI-Powered Study Assistant
 
-> A full-stack, multi-agent AI study buddy built with **LangChain**, **LangGraph**, **Streamlit**, and the **Model Context Protocol (MCP)**. Chat with an AI tutor, generate flashcards, take quizzes, save notes, and listen to answers read aloud — all in one app.
+> A full-stack, multi-agent AI study buddy built with **LangChain**, **LangGraph**, and **Streamlit**. Chat with an AI tutor, generate interactive flashcards, take quizzes, organize study notes, and listen to answers read aloud.
 
 ---
 
-## ✨ Features
+## ✨ Functional Features
 
 | Feature | Description |
 |---|---|
-| 💬 **Chat** | Conversational AI tutor with short-term memory across sessions |
-| 🃏 **Flashcards** | Auto-generated flip-card decks, with progress tracking and spaced-repetition retries |
-| 📝 **Notes** | Save study notes from chat; auto-organized into topic notebooks by an AI organizer agent |
-| 🔊 **Text-to-Speech** | Listen to any AI answer via Alibaba Qwen-TTS with selectable voices and styles |
-| 🖼️ **Image Understanding** | Attach PNG/JPEG screenshots; a vision model describes them before passing to the tutor |
-| 🧩 **Quizzes** | A dedicated quiz sub-agent writes 3-question multiple-choice quizzes on demand |
-| 🔒 **Human-in-the-Loop** | The agent pauses and asks for your approval before sending an email |
-| 🧠 **Dynamic Model Routing** | Switches between a fast model (short chats) and a smart model (long chats) automatically |
-| 📝 **Conversation Summarization** | Long conversations are automatically summarized to stay within token limits |
-| 🔑 **Private Workspaces** | Each visitor gets a unique URL key; data is fully isolated per user |
+| 💬 **Conversational AI Tutor** | Intelligent tutor with short-term memory across sessions, adapting explanations to your skill level |
+| 🃏 **Interactive 3D Flashcards** | AI-generated question/answer decks with interactive 3D flip animations, progress tracking, and missed-card retries |
+| 📝 **Smart Notes & Notebooks** | Capture notes from chat or manually; an automated organizer agent sorts them into topic notebooks |
+| 🧩 **Quiz Sub-Agent** | Generates 3-question multiple-choice quizzes on any topic with hidden expandable answer keys |
+| 🔊 **Voice Text-to-Speech** | Listen to any tutor response via Alibaba Qwen-TTS with audio caching, selectable voices, and speaking styles |
+| 🖼️ **Multimodal Vision** | Upload PNG/JPEG screenshots and notes; vision models describe diagrams and questions in memory |
+| 🧠 **Dynamic Model Routing** | Automatically routes short chats to a fast model and switches to a high-capacity model as conversations grow |
+| 📜 **Conversation Summarization** | Token-aware middleware automatically summarizes older context when exceeding token limits |
+| 🔒 **Private Workspaces** | Isolated per-user storage keyed by a unique URL parameter with path-traversal protection |
+| ⏱️ **Usage Guardrails** | Configurable message cap per chat session with reminder notices and seamless thread restarts |
 
 ---
 
@@ -26,27 +26,28 @@
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                     Streamlit UI (app.py)                   │
-│   Chat Page │ Flashcards Page │ Notes Page                  │
+│         💬 Chat  │  🃏 Flashcards  │  📝 Notes              │
 └──────────────────────┬──────────────────────────────────────┘
-                       │  invoke / state
+                       │ invoke / state
 ┌──────────────────────▼──────────────────────────────────────┐
 │                   Main Agent (agent.py)                     │
 │                                                             │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │                  Middleware Stack                    │   │
-│  │  personalize → ModelRouter → Summarization → HITL   │   │
+│  │  personalize (dynamic prompt) →                      │   │
+│  │  ModelRouter (FAST ➔ SMART) →                       │   │
+│  │  SummarizationMiddleware (token-triggered)           │   │
 │  └──────────────────────────────────────────────────────┘   │
 │                                                             │
 │  Tools: get_time │ get_profile │ save_note │ list_notes │   │
-│         create_flashcards │ send_email │ make_quiz (sub) │   │
-│                          + MCP tools (word_count, etc.)  │   │
-└────┬─────────────────────────────┬────────────────────────┘
-     │ checkpointer (SQLite/memory) │ organizer agent
+│         create_flashcards │ make_quiz (sub-agent tool)      │
+└────┬─────────────────────────────┬──────────────────────────┘
+     │ checkpointer (SQLite/Memory)│ secondary agent
      │                             ▼
 ┌────▼───────────┐     ┌────────────────────────┐
-│  LangGraph     │     │  Organizer (organizer. │
-│  Checkpoint    │     │  py) sorts notes into  │
-│  SQLite DB     │     │  topic notebooks       │
+│  LangGraph     │     │  Organizer Agent       │
+│  Checkpoint    │     │  (organizer.py) sorts  │
+│  SQLite DB     │     │  notes into notebooks  │
 └────────────────┘     └────────────────────────┘
      │
      ├── cards_store.py  → data/<uid>/flashcards.json
@@ -61,17 +62,16 @@
 
 | File | Purpose |
 |---|---|
-| `app.py` | Streamlit entry point — all UI pages (Chat, Flashcards, Notes), session wiring, image upload |
-| `agent.py` | Core agent: tools, middleware, model setup, multimodal helpers, CLI runner |
-| `organizer.py` | Second AI agent that groups notes into topic notebooks automatically |
-| `mcp_server.py` | Tiny MCP server (word counter + flashcard formatter) launched as a stdio subprocess |
-| `cards_store.py` | Read/write flashcard decks and per-card progress to JSON |
-| `notes_store.py` | Read/write study notes and their topic labels to JSON |
-| `chat_index.py` | Track which chat threads belong to a visitor, and their titles |
-| `userdata.py` | Validate/create user IDs and their private `data/<uid>/` directories |
-| `tts.py` | Text-to-Speech via Alibaba Qwen-TTS: clean markdown, chunk text, cache WAV files |
-| `graph.py` | Minimal entry point for `langgraph dev` / the Agent Chat UI |
-| `requirements.txt` | Python dependencies |
+| `app.py` | Streamlit entry point — handles all UI views (Chat, Flashcards, Notes), session state, and file uploads |
+| `agent.py` | Core agent definition — tools, middleware stack, model routing, multimodal vision, and CLI runner |
+| `organizer.py` | Dedicated secondary agent that categorizes student notes into topic notebooks via structured JSON |
+| `cards_store.py` | Thread-safe storage for flashcard decks, scores, and review statuses |
+| `notes_store.py` | Thread-safe storage for student notes and notebook topic assignments |
+| `chat_index.py` | Tracks chat history, timestamps, and thread metadata per visitor |
+| `userdata.py` | Secure workspace isolation and user ID validation (`data/<uid>/`) |
+| `tts.py` | Text-to-Speech engine — cleans text, chunks requests, joins WAVs, and caches audio to disk |
+| `graph.py` | Entry point for `langgraph dev` and the Agent Chat UI |
+| `requirements.txt` | Core project dependencies |
 
 ---
 
@@ -79,138 +79,110 @@
 
 ### Models
 
-The app uses **two AI providers**, both accessed via the OpenAI-compatible API:
+The system leverages OpenAI-compatible endpoints with dual-provider capability:
 
-| Constant | Provider | Default Model | When Used |
+| Identifier | Provider | Default Model | Purpose |
 |---|---|---|---|
-| `FAST` | DigitalOcean AI | `openai-gpt-oss-20b` | Short chats, quiz sub-agent, organizer |
-| `SMART` | Alibaba Cloud | `qwen-plus` | Long chats (>12 messages) |
-| `VISION` | Alibaba Cloud | `qwen3-vl-plus` | Image understanding |
+| `FAST` | DigitalOcean AI | `openai-gpt-oss-20b` | Standard chat, quiz generation, and notebook organizing |
+| `SMART` | Alibaba Cloud | `qwen-plus` | Complex or extended conversations (>12 messages) |
+| `VISION` | Alibaba Cloud | `qwen3-vl-plus` | Multimodal screenshot and diagram understanding |
 
 ### Tools
 
 | Tool | Description |
 |---|---|
-| `get_time` | Returns current date & time |
-| `get_profile` | Returns the student's name and level from runtime context |
-| `save_note` | Persists a note to the user's notes file and updates chat state |
-| `list_notes` | Lists all notes with their topic/notebook labels |
-| `create_flashcards` | Generates a named deck of Q&A flashcard pairs |
-| `send_email` | Fake email sender (requires human approval before running) |
-| `make_quiz` | Invokes the quiz sub-agent and returns formatted questions + answers |
-| MCP tools | `word_count`, `make_flashcard` (from the local MCP server) |
+| `get_time` | Returns the current date and time |
+| `get_profile` | Retrieves student name and proficiency level from runtime context |
+| `save_note` | Persists a note to the user's private notebook store and updates chat state |
+| `list_notes` | Lists all saved notes with their assigned topic notebooks |
+| `create_flashcards` | Generates a structured deck of flashcard question/answer pairs |
+| `make_quiz` | Invokes the quiz-maker sub-agent to generate a 3-question quiz with an answer key |
 
 ### Middleware Stack
 
-Applied in order on every model call:
+Applied sequentially on every model invocation:
 
-```
-personalize              → injects a dynamic system prompt with user name & level
-ModelRouter              → swaps FAST → SMART when conversation exceeds 12 messages
-SummarizationMiddleware  → summarizes old messages when token count > 4000, keeps last 10
-HumanInTheLoopMiddleware → pauses execution and waits for user approval on send_email
-```
+1. **`personalize`**: Dynamically tailors the system prompt to the user's name and experience level (beginner, intermediate, advanced).
+2. **`ModelRouter`**: Automatically upgrades the active model from `FAST` to `SMART` once a conversation exceeds 12 messages.
+3. **`SummarizationMiddleware`**: Triggers summarization when message tokens exceed 4,000, retaining the most recent 10 messages for continuous context.
 
 ### Context & State
 
-- **`Context`** (runtime) — passed at invoke time: `user_name`, `level`, `user_id`
-- **`StudyState`** (checkpoint) — extends `AgentState` with a `notes` list that tools update via `Command(update=...)`
+- **`Context`**: Read-only runtime context passed on invoke (`user_name`, `level`, `user_id`).
+- **`StudyState`**: State schema stored in checkpoints; tools return `Command(update=...)` to update state fields.
 
-### Multi-Agent System
+### Multi-Agent Architecture
 
-`make_quiz` is a **tool-wrapped sub-agent**: the main agent calls it like a tool, but internally it runs a completely separate `create_agent` with its own system prompt that generates 3-question multiple-choice quizzes with an answer key.
-
-The **organizer** (`organizer.py`) is a second standalone agent invoked from the Notes page to group all notes into topic notebooks and respond with structured JSON.
-
----
-
-## 🖼️ Multimodal Image Flow
-
-1. User uploads a PNG/JPEG (≤ 5 MB) in the chat input.
-2. `_validate_image()` checks magic bytes (not just file extension) and size.
-3. Image bytes are sent to `describe_image_bytes()` which calls the **Alibaba Vision model** (`qwen3-vl-plus`).
-4. The description is appended to the user's message as `[Attached image, described by a vision model: ...]`.
-5. The enriched text message is sent to the main agent — **no image ever touches disk**.
+- **Quiz Sub-Agent (`build_quiz_tool`)**: An isolated agent with its own system prompt wrapped as a tool. It formats 3 multiple-choice questions followed by an answers delimiter (`---ANSWERS---`).
+- **Organizer Agent (`organizer.py`)**: A standalone agent invoked when notes need clustering. It analyzes note contents and existing notebooks, returning strict JSON mapping each note ID to a topic.
 
 ---
 
-## 🔒 Privacy & Session Model
+## 🃏 Flashcard System (`cards_store.py`)
 
-Each visitor is identified by a **32-character random hex ID** stored in the URL as `?u=<uid>`. This ID:
-
-- Is validated with a strict regex to prevent path traversal attacks (`^[a-f0-9]{32}$`).
-- Maps to a private folder `data/<uid>/` containing `notes.json`, `flashcards.json`, and `chats.json`.
-- Is generated fresh for every new visitor (or if an invalid/missing ID is found in the URL).
-
-**Bookmark your URL** to return to your data — there is no login system.
-
-The free-tier chat cap is **10 user messages per chat thread**. Start a new chat to continue.
+1. **Deck Generation**: Request flashcards in chat (e.g., *"Make flashcards for Docker fundamentals"*). The agent calls `create_flashcards` to save the deck.
+2. **Interactive 3D Flip Card**: Built with CSS 3D transforms (`rotateY`) inside the Streamlit view. Clicking flips between question and answer.
+3. **Progress Tracking**: Users mark cards as ✅ **Got it** or ❌ **Missed it**. The app records right/wrong counts and last attempt status.
+4. **Targeted Review**: Study all cards or filter down to **"Only the ones I missed"** to reinforce weak points.
 
 ---
 
-## 🃏 Flashcard System
+## 🔊 Text-to-Speech System (`tts.py`)
 
-1. Ask the agent: *"Make me flashcards about neural networks"*
-2. Agent calls `create_flashcards(concept, cards)` → saved to `data/<uid>/flashcards.json`
-3. On the **Flashcards** page, pick a deck and click ▶️ Start studying
-4. A **3D CSS flip card** appears — click to reveal the answer (pure CSS/JS, no framework)
-5. Mark ✅ **Got it** or ❌ **Missed it** — right/wrong counts and last result are tracked per card
-6. At the end, see your score and optionally **redo only the missed cards**
-7. Cards are shuffled at the start of each session
-
----
-
-## 🔊 Text-to-Speech (`tts.py`)
-
-- Uses **Alibaba Qwen-TTS** (Singapore/international endpoint).
-- Cleans markdown, links, code blocks, emojis, and bullet symbols before speaking.
-- Splits text into ≤ 450-character sentence-aligned chunks (API limit ≈ 600 chars).
-- Joins multiple WAV chunks into a single audio stream using Python's `wave` module.
-- **Caches** generated audio to `audio_cache/` by MD5 hash of content — replays are instant and free.
-
-**Voices:** Cherry, Serena, Ethan, Chelsie, Momo, Vivian
-
-**Speaking Styles:**
-| Style | Instruction |
-|---|---|
-| Default voice | No instruction (standard TTS model) |
-| Friendly teacher | Warm, upbeat and encouraging |
-| Calm and clear | Calm, soft, slightly slower pace |
-| Energetic coach | Enthusiastic and motivating |
+- **Synthesizer**: Uses Alibaba Qwen-TTS (`qwen3-tts-flash` / `qwen3-tts-instruct-flash`).
+- **Text Normalization**: Strips markdown, emojis, URLs, and code blocks to generate natural-sounding speech.
+- **Smart Chunking**: Splits text into sentence-aligned pieces under 450 characters, then joins output audio using `wave`.
+- **Audio Caching**: Audio files are cached to `audio_cache/` using an MD5 hash of voice, style, and text — subsequent replays are instantaneous and consume zero API quota.
+- **Voices**: `Cherry`, `Serena`, `Ethan`, `Chelsie`, `Momo`, `Vivian`.
+- **Styles**: Default voice, Friendly teacher, Calm and clear, Energetic coach.
 
 ---
 
-## 🔧 Setup & Running
+## 🖼️ Multimodal Vision Processing
+
+1. Upload any PNG or JPEG file (up to 5 MB) directly in the chat bar.
+2. File validation verifies binary magic bytes (`\xff\xd8\xff` for JPEG, `\x89PNG` for PNG) rather than trusting file extensions alone.
+3. Image bytes are processed entirely in memory via `describe_image_bytes()` using Alibaba Vision (`qwen3-vl-plus`).
+4. The generated visual description is passed to the tutor alongside your prompt.
+
+---
+
+## 🔒 User Privacy & Session Management
+
+- Every student session is identified by a 32-character hexadecimal key in the URL (`?u=<uid>`).
+- Path validation enforces strict regex checks (`^[a-f0-9]{32}$`) to prevent directory traversal.
+- User files are strictly isolated under `data/<uid>/`:
+  - `notes.json`: User notes and notebook categorizations
+  - `flashcards.json`: Decks and progress statistics
+  - `chats.json`: Chat session history and metadata
+- Checkpoint data is stored per thread in an `aiosqlite` database or in-memory fallback.
+
+---
+
+## 🔧 Setup & Installation
 
 ### 1. Prerequisites
 
 - Python 3.11+
-- A **DigitalOcean AI** API key (`DO_API_KEY`) — **required**
-- An **Alibaba Cloud** API key (`ALIBABA_API_KEY`) — optional (enables SMART model, Vision, and TTS)
+- DigitalOcean AI API Key (`DO_API_KEY`) — required for core models
+- Alibaba Cloud API Key (`ALIBABA_API_KEY`) — optional, enables `SMART` model, Vision, and TTS
 
-### 2. Install dependencies
+### 2. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure secrets
+### 3. Configure API Keys
 
-Create `.streamlit/secrets.toml`:
+Create `.streamlit/secrets.toml` or a `.env` file in the project directory:
 
 ```toml
 DO_API_KEY = "your-digitalocean-api-key"
 ALIBABA_API_KEY = "your-alibaba-api-key"   # optional
 ```
 
-Or use a `.env` file in the project root:
-
-```env
-DO_API_KEY=your-digitalocean-api-key
-ALIBABA_API_KEY=your-alibaba-api-key
-```
-
-You can override the default model names via environment variables:
+You can optionally configure custom model endpoints:
 
 ```env
 FAST_MODEL=openai-gpt-oss-20b
@@ -218,55 +190,32 @@ SMART_MODEL=qwen-plus
 VISION_MODEL=qwen3-vl-plus
 ```
 
-### 4. Run the Streamlit app
+### 4. Run the Streamlit Application
 
 ```bash
 streamlit run app.py
 ```
 
-The app opens at `http://localhost:8501`. Your private URL will be `http://localhost:8501/?u=<your-uid>`.
+The app will launch at `http://localhost:8501`. A unique user link (`?u=...`) will be generated automatically.
 
-### 5. Run in CLI mode (no UI)
+### 5. CLI Mode
+
+To interact with the agent from a terminal without a browser:
 
 ```bash
 python agent.py
 ```
 
-Type messages directly at the prompt. Use `/image path.png What is this?` to send an image.
-
-### 6. Run with LangGraph Dev UI
-
-```bash
-langgraph dev
-```
-
-Uses `graph.py` as the entry point and `langgraph.json` for configuration. The server provides its own checkpointing, so no SQLite is needed.
-
 ---
 
-## 🌐 MCP Server (`mcp_server.py`)
-
-The app spawns a local **Model Context Protocol** server as a subprocess over `stdio`. It exposes two utility tools to the agent:
-
-| Tool | Description |
-|---|---|
-| `word_count(text)` | Counts the number of words in a string |
-| `make_flashcard(question, answer)` | Formats a Q/A pair as `Q: ...\nA: ...` |
-
-The server is built with `FastMCP` and is launched automatically by both the Streamlit app and the CLI runner via `MultiServerMCPClient`.
-
----
-
-## 💡 Example Chat Prompts
+## 💡 Example Prompts
 
 ```
-"Explain transformer attention in simple words"
-"Make me flashcards about the OSI model"
-"Quiz me on Python decorators"
-"Save a note: LoRA fine-tunes a model with small adapter matrices"
-"What does this screenshot show?"  ← attach an image
-"Send an email to alice@example.com summarizing today's session"
-"How many words are in the following text: ..."
+"Explain how Retrieval-Augmented Generation (RAG) works in simple terms."
+"Make me flashcards on Python list comprehensions and generators."
+"Quiz me on relational database normalization."
+"Save a note: Latency measures response time, while throughput measures capacity."
+"What does this diagram represent?" (attach an architecture diagram)
 ```
 
 ---
@@ -278,36 +227,12 @@ streamlit>=1.43
 langchain>=1.0
 langgraph>=1.0
 langchain-openai
-langchain-mcp-adapters
-mcp
 langgraph-checkpoint-sqlite
 aiosqlite
 httpx
 python-dotenv
 langgraph-cli[inmem]
 ```
-
----
-
-## 🎓 LangChain Course Concepts Covered
-
-This project is a practical demonstration of the following course topics:
-
-| Concept | Where in the code |
-|---|---|
-| Create Agent | `build_agent()` in `agent.py` |
-| Foundational Models | `do_model()` / `alibaba_model()` + FAST / SMART / VISION |
-| Tools | `get_time`, `save_note`, `create_flashcards`, `send_email`, ... |
-| Short-Term Memory | `checkpointer` + `thread_id` in LangGraph |
-| Multimodal Messages | `image_message()` + Alibaba vision model |
-| MCP | `MultiServerMCPClient` + `mcp_server.py` |
-| Context and State | `Context` (runtime) + `StudyState` (custom state schema) |
-| Multi-Agent Systems | Quiz-maker sub-agent wrapped as a `make_quiz` tool |
-| Middleware | `personalize` / `ModelRouter` / `SummarizationMiddleware` / HITL |
-| Managing Long Convos | `SummarizationMiddleware` |
-| Human-in-the-Loop | `HumanInTheLoopMiddleware` on `send_email` |
-| Dynamic Agents | Dynamic system prompt (name, level) + `ModelRouter` |
-| Agent Chat UI | `graph.py` + `langgraph.json` |
 
 ---
 

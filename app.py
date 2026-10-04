@@ -13,9 +13,7 @@ from pathlib import Path
 import aiosqlite
 import streamlit as st
 import streamlit.components.v1 as components
-from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.types import Command
 
 log = logging.getLogger(__name__)
 
@@ -87,11 +85,7 @@ def get_runtime():
         except Exception:
             return InMemorySaver()
 
-    client = MultiServerMCPClient(
-        {"study_tools": {"command": sys.executable, "args": [str(HERE / "mcp_server.py")], "transport": "stdio"}}
-    )
-    mcp_tools = run(client.get_tools())  # MCP
-    agent = build_agent(mcp_tools, run(make_saver()))
+    agent = build_agent(checkpointer=run(make_saver()))
     return run, agent
 
 
@@ -312,26 +306,6 @@ def chat_page():
     if 0 < remaining <= 3:
         st.caption(f"⚠️ {remaining} free message{'s' if remaining != 1 else ''} left in this chat.")
 
-    pending = None  # the agent paused and needs a human decision
-    for it in getattr(state, "interrupts", ()) or ():
-        pending = it.value["action_requests"]
-        break
-
-    if pending:
-        with st.chat_message("assistant"):
-            st.warning("I need your approval before doing this:")
-            for r in pending:
-                st.code(f"{r['name']}({r['args']})", language="python")
-            col1, col2 = st.columns(2)
-            decision = None
-            if col1.button("✅ Approve"):
-                decision = {"type": "approve"}
-            if col2.button("❌ Reject"):
-                decision = {"type": "reject", "message": "User said no."}
-        if decision:
-            call_agent(Command(resume={"decisions": [decision] * len(pending)}))
-            st.rerun()
-
     if limit_reached:
         st.info(
             f"🎓 You've used all {FREE_MSG_LIMIT} free messages in this chat. "
@@ -344,7 +318,6 @@ def chat_page():
         "Ask me anything, or attach an image...",
         accept_file=True,
         file_type=["png", "jpg", "jpeg"],
-        disabled=bool(pending),
     )
     if queued:
         send(queued)
